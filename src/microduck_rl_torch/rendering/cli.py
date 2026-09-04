@@ -24,6 +24,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--gif", type=Path)
     parser.add_argument("--steps", type=int, default=250)
+    parser.add_argument(
+        "--seconds",
+        type=float,
+        help="Requested simulated rollout duration; takes precedence over --steps",
+    )
     parser.add_argument("--fps", type=int, default=25)
     parser.add_argument("--render-every", type=int, default=2)
     parser.add_argument("--width", type=int, default=320)
@@ -46,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
     )
     parser.add_argument("--contacts", choices=("enabled", "disabled"), default="enabled")
+    parser.add_argument(
+        "--mesh-mesh-contacts",
+        choices=("enabled", "disabled"),
+        default="enabled",
+        help="Enable or skip detailed mesh-to-mesh contacts; plane contacts remain independent",
+    )
     parser.add_argument("--gif-fps", type=int, default=12)
     parser.add_argument("--gif-width", type=int, default=720)
     parser.add_argument("--gif-colors", type=int, default=48)
@@ -54,6 +65,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=256,
         help="Pixels processed per chunk by the pure Torch mesh ray renderer",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress rollout progress messages on stderr",
     )
     args = parser.parse_args(argv)
 
@@ -67,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         output=args.output,
         gif_output=args.gif,
         steps=args.steps,
+        seconds=args.seconds,
         fps=args.fps,
         render_every=args.render_every,
         width=args.width,
@@ -81,10 +98,12 @@ def main(argv: list[str] | None = None) -> int:
         solver_iterations=args.solver_iterations,
         line_search_iterations=args.line_search_iterations,
         disable_contacts=args.contacts == "disabled",
+        disable_mesh_mesh_contacts=args.mesh_mesh_contacts == "disabled",
         gif_fps=args.gif_fps,
         gif_width=args.gif_width,
         gif_colors=args.gif_colors,
         ray_chunk_size=args.ray_chunk_size,
+        progress=not args.quiet,
     )
     print(json.dumps(result, indent=2))
     return 0 if result["status"] == "pass" else 1

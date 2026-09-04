@@ -170,7 +170,24 @@ This writes `artifacts/render/microduck-alpha-walking.mp4` and
 `artifacts/render/microduck-alpha-walking.gif`. The rollout dynamics and observations come from
 `mujoco-torch`; the default renderer uses native MuJoCo only to rasterize that Torch state with
 the complete CAD visual model. `make render-golden-torch` runs the same Torch environment and
-writes `-torch.mp4`/`-torch.gif` outputs. To exercise the pure Torch ray renderer instead, run:
+writes `-torch.mp4`/`-torch.gif` outputs.
+
+The rollout duration can be selected directly from the Makefile. Ten simulated seconds at the
+50 Hz policy rate are 500 control steps:
+
+```bash
+make render-golden-gif RENDER_SECONDS=10
+# or use the convenience target:
+make render-golden-10s
+```
+
+`RENDER_SECONDS` is converted using the model timestep and decimation, so it remains correct if
+those values change. `RENDER_STEPS` remains available for exact step-count experiments.
+Rendering defaults to contacts with the floor enabled and detailed mesh-to-mesh contacts disabled;
+the latter can make a fallen CAD model spend an unbounded amount of time in the convex SAT solver.
+Use `RENDER_MESH_MESH_CONTACTS=enabled` when that self-contact path is specifically under test.
+
+To exercise the pure Torch ray renderer instead, run:
 
 ```bash
 make render-golden-ray RENDER_WIDTH=64 RENDER_HEIGHT=48
@@ -221,6 +238,7 @@ make render-golden                 # golden Torch rollout to MP4
 make render-golden-gif             # golden Torch rollout to MP4 and GIF
 make render-golden-torch           # full-CAD Torch rollout to MP4 and GIF
 make render-golden-ray             # pure mujoco-torch ray-rendered rollout
+make render-golden-10s              # 10-second golden rollout to MP4 and GIF
 make build                         # build a wheel and source distribution
 ```
 

@@ -130,6 +130,7 @@ def load_microduck_model(
     solver_iterations: int | None = None,
     line_search_iterations: int | None = None,
     disable_contacts: bool = False,
+    disable_mesh_mesh_contacts: bool = False,
 ) -> MicroDuckModelBundle:
     """Load the nominal walk model and convert it to a `mujoco-torch` model."""
 
@@ -173,6 +174,8 @@ def load_microduck_model(
     stand_id = _required_id(native_model, mujoco_api.mjtObj.mjOBJ_KEY, "STAND")
     stand_qpos = np.asarray(native_model.key_qpos[stand_id], dtype=np.float64)
     model = mujoco_torch.device_put(native_model, dtype=dtype).to(device_obj)
+    if disable_mesh_mesh_contacts:
+        model._device_precomp["skip_mesh_mesh_contacts"] = True
     return MicroDuckModelBundle(
         xml_path=path,
         native_model=native_model,

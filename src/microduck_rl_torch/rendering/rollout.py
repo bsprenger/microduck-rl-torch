@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import Any, Literal
@@ -91,6 +92,7 @@ def render_policy_rollout(
     output: str | Path,
     gif_output: str | Path | None = None,
     steps: int = 250,
+    seconds: float | None = None,
     fps: int = 25,
     render_every: int = 2,
     width: int = 320,
@@ -106,10 +108,12 @@ def render_policy_rollout(
     solver_iterations: int = 4,
     line_search_iterations: int = 4,
     disable_contacts: bool = False,
+    disable_mesh_mesh_contacts: bool = False,
     gif_fps: int = 12,
     gif_width: int = 720,
     gif_colors: int = 48,
     ray_chunk_size: int = 256,
+    progress: bool = True,
 ) -> dict[str, Any]:
     """Roll out the HF policy in the Torch env and save MP4/GIF artifacts.
 
@@ -120,8 +124,10 @@ def render_policy_rollout(
     robot's attached ``head_camera``.
     """
 
-    if steps < 1 or render_every < 1:
-        raise ValueError("steps and render_every must be positive")
+    if render_every < 1:
+        raise ValueError("render_every must be positive")
+    if seconds is not None and seconds <= 0:
+        raise ValueError("seconds must be positive")
     if render_backend not in ("mujoco", "mujoco-torch"):
         raise ValueError(f"Unknown render backend {render_backend!r}")
     if render_backend == "mujoco-torch" and camera == "free":
@@ -134,13 +140,25 @@ def render_policy_rollout(
         solver_iterations=solver_iterations,
         line_search_iterations=line_search_iterations,
         disable_contacts=disable_contacts,
+        disable_mesh_mesh_contacts=disable_mesh_mesh_contacts,
     )
     environment = NominalMicroDuckEnv(
         bundle,
         command=command_vector(vx=vx, vy=vy, vtheta=vtheta, device=bundle.device),
     )
+    if seconds is not None:
+        control_timestep = bundle.timestep * environment.decimation
+        steps = max(1, int(round(seconds / control_timestep)))
+    if steps < 1:
+        raise ValueError("steps must be positive")
     policy = OnnxPolicy(artifact)
     observation = environment.reset()
+    if progress:
+        print(
+            f"Rendering {steps} Torch-environment steps with {render_backend} -> {output}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     renderer: mujoco.Renderer | None = None
     render_data: Any | None = None
@@ -192,6 +210,12 @@ def render_policy_rollout(
                     )
                 writer.write(frame)
                 rendered_frames += 1
+                if progress and (rendered_frames == 1 or rendered_frames % 10 == 0):
+                    print(
+                        f"  frame {rendered_frames} (step {step + 1}/{steps})",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
             action = policy(observation)
             if action.shape != (bundle.action_size,) or not torch.isfinite(action).all():
