@@ -29,6 +29,7 @@ from .managers import (
 from .model import MicroDuckModelBundle, load_microduck_model
 from .observations import build_actor_observation
 from .rewards import compute_reward, foot_contact_mask
+from .scene import SceneBuild, SceneBuilder
 from .task_config import TaskEnvCfg
 
 mujoco_api: Any = mujoco
@@ -787,8 +788,10 @@ class ManagerBasedTaskEnv(NominalMicroDuckEnv):
         if "robot" not in task_cfg.scene.entities:
             raise ValueError("Task scene must contain a named 'robot' entity")
         robot_cfg = task_cfg.scene.entities["robot"]
+        scene_build: SceneBuild = SceneBuilder().build(task_cfg.scene)
         if bundle is None:
             bundle = load_microduck_model(
+                xml_path=scene_build.xml_path,
                 entity_cfg=robot_cfg,
                 device=device,
                 dtype=dtype,
@@ -808,11 +811,17 @@ class ManagerBasedTaskEnv(NominalMicroDuckEnv):
                 else domain_randomization
             ),
         )
+        if bundle.entity_cfg.xml_path.resolve() != robot_cfg.xml_path.resolve():
+            raise ValueError(
+                "Task entity and model bundle refer to different robot XMLs: "
+                f"{robot_cfg.xml_path} != {bundle.entity_cfg.xml_path}"
+            )
         if task_cfg.action_size != bundle.action_size:
             raise ValueError(
                 f"Task declares {task_cfg.action_size} actions, model exposes {bundle.action_size}"
-            )
+        )
         self.task_cfg = task_cfg
+        self.scene_build = scene_build
         self.action_manager = ActionManager(task_cfg.actions)
         self.command_manager = CommandManager(task_cfg.commands)
         self.observation_manager = ObservationManager(task_cfg.observations)

@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
-PYTHON ?= uv run python
-PYTEST ?= uv run pytest
+PYTHON ?= PYTHONPATH=src uv run python
+PYTEST ?= PYTHONPATH=src uv run pytest
 SCRIPT_LAUNCHER ?= scripts/run_with_mjpython.py
 POLICY ?= alpha_walking
 POLICY_DIR ?= artifacts/hf
@@ -126,7 +126,7 @@ BENCHMARK_MESH_MESH_CONTACTS ?= disabled
 
 .PHONY: benchmark-physics
 benchmark-physics: ## Benchmark direct physics stepping without policy inference
-	@uv run --group benchmark python scripts/benchmark_physics.py \
+	@PYTHONPATH=src uv run --group benchmark python scripts/benchmark_physics.py \
 		--backend "$(BENCHMARK_BACKEND)" --devices "$(BENCHMARK_DEVICES)" \
 		--steps "$(BENCHMARK_STEPS)" --warmup-steps "$(BENCHMARK_WARMUP_STEPS)" \
 		--repeats "$(BENCHMARK_REPEATS)" \
@@ -180,17 +180,17 @@ RENDER_ARGS = \
 
 .PHONY: render-golden
 render-golden: fetch-golden-policy ## Render the HF golden policy in the Torch env to MP4
-	@uv run python $(SCRIPT_LAUNCHER) --module microduck_rl_torch.rendering.cli -- \
+	@PYTHONPATH=src uv run python $(SCRIPT_LAUNCHER) --module microduck_rl_torch.rendering.cli -- \
 		$(RENDER_ARGS)
 
 .PHONY: render-golden-native
 render-golden-native: fetch-golden-policy ## Render through the native MuJoCo OpenGL context
-	@uv run python $(SCRIPT_LAUNCHER) --module microduck_rl_torch.rendering.cli -- \
+	@PYTHONPATH=src uv run python $(SCRIPT_LAUNCHER) --module microduck_rl_torch.rendering.cli -- \
 		$(RENDER_ARGS) --render-backend mujoco
 
 .PHONY: render-golden-torch
 render-golden-torch: fetch-golden-policy ## Render the Torch env with full CAD to MP4 and GIF
-	@uv run python $(SCRIPT_LAUNCHER) --module microduck_rl_torch.rendering.cli -- \
+	@PYTHONPATH=src uv run python $(SCRIPT_LAUNCHER) --module microduck_rl_torch.rendering.cli -- \
 		$(RENDER_ARGS) --render-backend mujoco --camera free \
 		--output "$(RENDER_OUTPUT:.mp4=-torch.mp4)" \
 		--gif "$(RENDER_GIF:.gif=-torch.gif)" --gif-fps "$(RENDER_GIF_FPS)" \
@@ -198,7 +198,7 @@ render-golden-torch: fetch-golden-policy ## Render the Torch env with full CAD t
 
 .PHONY: render-golden-ray
 render-golden-ray: fetch-golden-policy ## Render with the pure mujoco-torch ray renderer
-	@uv run microduck-render \
+	@PYTHONPATH=src uv run microduck-render \
 		--policy "$(POLICY)" --policy-dir "$(POLICY_DIR)" \
 		--output "$(RENDER_OUTPUT:.mp4=-ray.mp4)" \
 		$(RENDER_DURATION_ARGS) --fps "$(RENDER_FPS)" \
@@ -218,13 +218,13 @@ render-golden-ray: fetch-golden-policy ## Render with the pure mujoco-torch ray 
 
 .PHONY: convert-gif
 convert-gif: ## Convert RENDER_OUTPUT into a looping palette-optimized GIF
-	@uv run microduck-convert-gif \
+	@PYTHONPATH=src uv run microduck-convert-gif \
 		--input "$(RENDER_OUTPUT)" --output "$(RENDER_GIF)" \
 		--fps "$(RENDER_GIF_FPS)" --width "$(RENDER_GIF_WIDTH)" --colors "$(RENDER_GIF_COLORS)"
 
 .PHONY: render-golden-gif
 render-golden-gif: fetch-golden-policy ## Render the HF golden policy to MP4 and GIF
-	@uv run python $(SCRIPT_LAUNCHER) --module microduck_rl_torch.rendering.cli -- \
+	@PYTHONPATH=src uv run python $(SCRIPT_LAUNCHER) --module microduck_rl_torch.rendering.cli -- \
 		$(RENDER_ARGS) \
 		--gif "$(RENDER_GIF)" --gif-fps "$(RENDER_GIF_FPS)" \
 		--gif-width "$(RENDER_GIF_WIDTH)" --gif-colors "$(RENDER_GIF_COLORS)"

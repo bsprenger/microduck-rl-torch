@@ -184,7 +184,7 @@ def render_policy_rollout(
     completed_steps = 0
     finite = True
     succeeded = False
-    start_position = np.asarray(bundle.native_model.key("STAND").qpos[:2], dtype=np.float64)
+    start_position = bundle.default_qpos[:2].detach().cpu().numpy().astype(np.float64, copy=True)
     final_position = start_position.copy()
     try:
         for step in range(steps):

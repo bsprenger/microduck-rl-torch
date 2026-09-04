@@ -109,3 +109,12 @@ MICRODUCK_ROLLERS_BACKLASH_ROBOT_CFG = _entity(
     "robot_groundcontact_rollers_backlash.xml",
     foot_selectors=_ROLLER_FOOT_SELECTORS,
 )
+
+MICRODUCK_BALL_CFG = EntityCfg(
+    name="ball",
+    xml_path=_asset_root() / "ball.xml",
+    scene_xml_path=_asset_root() / "scene_ball.xml",
+    kind="prop",
+    keyframe_name=None,
+    actuator_joint_names=(),
+)

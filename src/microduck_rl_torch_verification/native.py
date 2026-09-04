@@ -59,10 +59,11 @@ class NativeMicroDuckEnv:
             self.backlash_qvel_indices = bundle.backlash_qvel_indices.detach().cpu().numpy()
             self.backlash_mask = bundle.backlash_mask.detach().cpu().numpy()
             self.friction_dof_count = bundle.friction_dof_count
+            self.foot_geom_groups = bundle.foot_geom_groups
             self.foot_geom_ids = bundle.foot_geom_ids
             self.foot_site_ids = bundle.foot_site_ids
             self.collision_geom_ids = bundle.collision_geom_ids
-            self.default_qpos = np.asarray(self.model.key("STAND").qpos, dtype=np.float64).copy()
+            self.default_qpos = bundle.default_qpos.detach().cpu().numpy().copy()
             self.default_pose = self.default_qpos[self.qpos_indices].copy()
         else:
             self.xml_path = (xml_path or default_scene_path()).resolve()
@@ -93,6 +94,7 @@ class NativeMicroDuckEnv:
                 mujoco_api.mj_name2id(self.model, mujoco_api.mjtObj.mjOBJ_GEOM, name)
                 for name in ("left_foot_collision", "right_foot_collision")
             )
+            self.foot_geom_groups = tuple((geom_id,) for geom_id in self.foot_geom_ids)
             self.foot_site_ids = tuple(
                 mujoco_api.mj_name2id(self.model, mujoco_api.mjtObj.mjOBJ_SITE, name)
                 for name in ("left_foot", "right_foot")
@@ -106,7 +108,12 @@ class NativeMicroDuckEnv:
                 and name.endswith("_collision")
             )
             stand_id = mujoco_api.mj_name2id(self.model, mujoco_api.mjtObj.mjOBJ_KEY, "STAND")
-            self.default_qpos = np.asarray(self.model.key_qpos[stand_id], dtype=np.float64).copy()
+            if stand_id >= 0:
+                self.default_qpos = np.asarray(
+                    self.model.key_qpos[stand_id], dtype=np.float64
+                ).copy()
+            else:
+                self.default_qpos = np.asarray(self.model.qpos0, dtype=np.float64).copy()
             self.default_pose = self.default_qpos[self.qpos_indices].copy()
 
         self.model.opt.timestep = timestep
@@ -195,8 +202,10 @@ class NativeMicroDuckEnv:
         result = np.zeros(2, dtype=bool)
         for index in range(int(self.data.ncon)):
             contact = self.data.contact[index]
-            for foot_index, geom_id in enumerate(self.foot_geom_ids):
-                result[foot_index] |= contact.geom1 == geom_id or contact.geom2 == geom_id
+            for foot_index, geom_group in enumerate(self.foot_geom_groups):
+                result[foot_index] |= any(
+                    contact.geom1 == geom_id or contact.geom2 == geom_id for geom_id in geom_group
+                )
         return result
 
     def _self_collision(self) -> bool:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..task_config import TermCollection
+from .base import TaskRuntimeContext
 
 
 @dataclass
@@ -15,4 +16,4 @@ class CurriculumManager:
     def step(self, env: Any) -> None:
         for term in self.terms.values():
             if term.enabled and term.func is not None:
-                term.func(env)
+                term.func(TaskRuntimeContext(env))

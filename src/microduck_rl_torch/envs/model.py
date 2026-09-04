@@ -289,9 +289,7 @@ def _move_mesh_geometry(model: Any, *, device: torch.device) -> Any:
     """
 
     def move_optional(values: tuple[Any, ...]) -> tuple[Any, ...]:
-        return tuple(
-            None if value is None else value.to(device=device) for value in values
-        )
+        return tuple(None if value is None else value.to(device=device) for value in values)
 
     convex_fields = {
         "geom_convex_vert": move_optional(model.geom_convex_vert),

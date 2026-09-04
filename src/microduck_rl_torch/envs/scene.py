@@ -96,3 +96,4 @@ class SceneCfg:
     sensors: dict[str, SensorCfg] = field(default_factory=dict)
     scene_xml: Path | None = None
     contact_options: dict[str, Any] = field(default_factory=dict)
+
