@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "microduck-rl-torch"
+version = "0.1.0"
+description = "A standalone MuJoCo-Torch MicroDuck policy and environment validation stack."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "Pollen Robotics" }]
+dependencies = [
+    "huggingface_hub>=0.27",
+    "mujoco>=3.0",
+    # Keep this pinned to the sibling checkout while developing the simulator.
+    "mujoco-torch @ file:///Users/bensprenger/repositories/mujoco-torch",
+    "numpy>=2.0",
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+    "torch>=2.6",
+]
+
+[dependency-groups]
+dev = [
+    "build>=1.2",
+    "deptry>=0.23",
+    "pre-commit>=4.0",
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.11",
+    "ty>=0.0.1a20",
+]
+training = ["torchrl>=0.6"]
+
+[project.scripts]
+microduck-fetch-policy = "microduck_rl_torch.policies.huggingface:main"
+microduck-validate = "microduck_rl_torch_verification.validate:main"
+microduck-render = "microduck_rl_torch.rendering.cli:main"
+microduck-convert-gif = "microduck_rl_torch.rendering.video_cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/microduck_rl_torch", "src/microduck_rl_torch_verification"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"assets" = "assets"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+markers = [
+    "integration: exercises the MuJoCo-Torch environment",
+    "network: requires access to Hugging Face",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

@@ -1,0 +1,21 @@
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+__pycache__/
+.DS_Store
+
+# Downloaded policies and generated traces are reproducible artifacts.
+artifacts/
+benchmarks/results/
+
+# Local Hugging Face and uv caches.
+.cache/
+.hf-cache/
+
