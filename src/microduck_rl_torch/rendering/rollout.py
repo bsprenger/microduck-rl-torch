@@ -21,6 +21,7 @@ from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 from .video import VideoWriter, convert_video_to_gif
 
 RenderBackend = Literal["mujoco", "mujoco-torch"]
+ActuatorMode = Literal["bam", "xml"]
 CameraName = Literal["free", "head_camera"]
 mujoco_api: Any = mujoco
 
@@ -100,9 +101,10 @@ def render_policy_rollout(
     height: int = 240,
     device: str = "cpu",
     dtype: torch.dtype = torch.float64,
+    actuator_mode: ActuatorMode = "xml",
     render_backend: RenderBackend = "mujoco",
     camera: CameraName = "free",
-    vx: float = 0.15,
+    vx: float = 0.3,
     vy: float = 0.0,
     vtheta: float = 0.0,
     fixed_iterations: bool = True,
@@ -110,7 +112,7 @@ def render_policy_rollout(
     line_search_iterations: int = 4,
     disable_contacts: bool = False,
     disable_mesh_mesh_contacts: bool = False,
-    gif_fps: int = 12,
+    gif_fps: int = 25,
     gif_width: int = 720,
     gif_colors: int = 48,
     ray_chunk_size: int = 256,
@@ -131,10 +133,17 @@ def render_policy_rollout(
         raise ValueError("seconds must be positive")
     if render_backend not in ("mujoco", "mujoco-torch"):
         raise ValueError(f"Unknown render backend {render_backend!r}")
+    if actuator_mode not in ("bam", "xml"):
+        raise ValueError(f"Unknown actuator mode {actuator_mode!r}")
     if render_backend == "mujoco-torch" and camera == "free":
         raise ValueError("The mujoco-torch renderer requires --camera head_camera")
 
+    # The downloaded alpha policy was previously rendered against the XML
+    # position actuators.  Keep that deployment/reproduction path explicit,
+    # while leaving the task factory's upstream BAM default intact for parity
+    # and future task work.
     task_cfg = make_microduck_velocity_env_cfg()
+    task_cfg.actions.actuator_mode = actuator_mode
     bundle = load_microduck_model(
         entity_cfg=task_cfg.scene.entities["robot"],
         device=device,
@@ -144,6 +153,7 @@ def render_policy_rollout(
         line_search_iterations=line_search_iterations,
         disable_contacts=disable_contacts,
         disable_mesh_mesh_contacts=disable_mesh_mesh_contacts,
+        actuator_mode=actuator_mode,
     )
     environment = ManagerBasedTaskEnv(
         task_cfg,
@@ -266,6 +276,7 @@ def render_policy_rollout(
         "rendered_frames": rendered_frames,
         "render_backend": render_backend,
         "camera": camera,
+        "actuator_mode": actuator_mode,
         "contacts_enabled": bundle.contacts_enabled,
         "output": str(Path(output)),
         "gif_output": str(gif_path) if gif_path is not None else None,

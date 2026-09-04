@@ -35,12 +35,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--height", type=int, default=240)
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
+        "--actuator-mode",
+        choices=("xml", "bam"),
+        default="xml",
+        help=(
+            "Actuator model for the visual rollout (xml reproduces the original "
+            "golden video; bam is the upstream parity path)"
+        ),
+    )
+    parser.add_argument(
         "--render-backend",
         choices=("mujoco", "mujoco-torch"),
         default="mujoco",
     )
     parser.add_argument("--camera", choices=("free", "head_camera"), default="free")
-    parser.add_argument("--vx", type=float, default=0.15)
+    parser.add_argument("--vx", type=float, default=0.3)
     parser.add_argument("--vy", type=float, default=0.0)
     parser.add_argument("--vtheta", type=float, default=0.0)
     parser.add_argument("--solver-iterations", type=int, default=4)
@@ -57,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         default="enabled",
         help="Enable or skip detailed mesh-to-mesh contacts; plane contacts remain independent",
     )
-    parser.add_argument("--gif-fps", type=int, default=12)
+    parser.add_argument("--gif-fps", type=int, default=25)
     parser.add_argument("--gif-width", type=int, default=720)
     parser.add_argument("--gif-colors", type=int, default=48)
     parser.add_argument(
@@ -89,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         width=args.width,
         height=args.height,
         device=args.device,
+        actuator_mode=args.actuator_mode,
         render_backend=args.render_backend,
         camera=args.camera,
         vx=args.vx,

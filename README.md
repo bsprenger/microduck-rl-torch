@@ -240,6 +240,21 @@ This writes `artifacts/render/microduck-alpha-walking.mp4` and
 the complete CAD visual model. `make render-golden-torch` runs the same Torch environment and
 writes `-torch.mp4`/`-torch.gif` outputs.
 
+The task factory defaults to the upstream BAM M6 actuator model. The golden visual rollout
+defaults to `RENDER_ACTUATOR_MODE=xml` to reproduce the original alpha-walking deployment video;
+use `RENDER_ACTUATOR_MODE=bam` to render the upstream actuator-parity path explicitly:
+
+```bash
+RENDER_ACTUATOR_MODE=bam make render-golden-10s
+```
+
+This is a rollout-mode choice only: both actuator implementations remain available through the
+same composed task and model boundaries.
+
+The default visual command is `vx=0.3 m/s`, which is the forward command at which the published
+alpha policy produces a clear gait in this deterministic rollout. Pass `RENDER_VX=0.15` (or a
+different `--vx`) when testing the lower-speed command basin.
+
 The rollout duration can be selected directly from the Makefile. Ten simulated seconds at the
 50 Hz policy rate are 500 control steps:
 

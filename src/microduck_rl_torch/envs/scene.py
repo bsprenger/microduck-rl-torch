@@ -97,3 +97,52 @@ class SceneCfg:
     scene_xml: Path | None = None
     contact_options: dict[str, Any] = field(default_factory=dict)
 
+
+@dataclass(frozen=True)
+class SceneBuild:
+    """Concrete scene source selected from a declarative ``SceneCfg``."""
+
+    xml_path: Path
+    entity_names: tuple[str, ...]
+    terrain_kind: str
+
+
+class SceneBuilder:
+    """Resolve scene wrappers without leaking XML policy into task code.
+
+    The current backend consumes one compiled MuJoCo XML source, so an
+    explicit scene wrapper is preferred. A single entity's root XML is a valid
+    fallback. Multi-entity composition remains at this boundary for future
+    prop tasks instead of leaking an XML merge policy into the environment.
+    """
+
+    def __init__(self, config: SceneCfg | None = None) -> None:
+        self.config = config
+
+    def build(self, config: SceneCfg | None = None) -> SceneBuild:
+        config = config or self.config
+        if config is None:
+            raise ValueError("SceneBuilder requires a SceneCfg")
+        if not config.entities:
+            raise ValueError("A scene must contain at least one entity")
+        entity_paths = {
+            name: entity.load_path.resolve() for name, entity in config.entities.items()
+        }
+        if config.scene_xml is not None:
+            xml_path = config.scene_xml.resolve()
+        elif len(entity_paths) == 1:
+            xml_path = next(iter(entity_paths.values()))
+        else:
+            raise ValueError(
+                "A multi-entity scene requires an explicit scene_xml or a future scene composer"
+            )
+        if not xml_path.is_file():
+            raise FileNotFoundError(xml_path)
+        for name, path in entity_paths.items():
+            if not path.is_file():
+                raise FileNotFoundError(f"Entity {name!r} XML source does not exist: {path}")
+        return SceneBuild(
+            xml_path=xml_path,
+            entity_names=tuple(config.entities),
+            terrain_kind=config.terrain.kind,
+        )

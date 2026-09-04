@@ -11,7 +11,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--fps", type=int, default=12)
+    parser.add_argument("--fps", type=int, default=25)
     parser.add_argument("--width", type=int, default=720)
     parser.add_argument("--colors", type=int, default=48)
     parser.add_argument("--dither", default="bayer")

@@ -636,6 +636,10 @@ class NominalMicroDuckEnv:
             and self.step_count % self.config.delay_update_period == 0
         ):
             self.state.imu_lag = self._sample_delay(*self.config.imu_delay_lag)
+        if self.event_manager is not None:
+            # Post-physics terms observe the freshly integrated state and must
+            # run before commands, observations, rewards, and terminations.
+            self.event_manager.apply(self, "post_physics")
         if self.command_manager is not None:
             self.command_manager.step(self)
         elif self.domain_randomization and not self._fixed_command:
@@ -730,8 +734,6 @@ class NominalMicroDuckEnv:
                 "bad_orientation": bad_orientation_value,
                 "timeout": truncated,
             }
-        if self.event_manager is not None:
-            self.event_manager.apply(self, "post_physics")
         if self.curriculum_manager is not None:
             self.curriculum_manager.step(self)
         info: dict[str, Any] = {
@@ -819,7 +821,7 @@ class ManagerBasedTaskEnv(NominalMicroDuckEnv):
         if task_cfg.action_size != bundle.action_size:
             raise ValueError(
                 f"Task declares {task_cfg.action_size} actions, model exposes {bundle.action_size}"
-        )
+            )
         self.task_cfg = task_cfg
         self.scene_build = scene_build
         self.action_manager = ActionManager(task_cfg.actions)

@@ -66,7 +66,7 @@ typecheck:
 deptry:
 	uv run deptry . -kf microduck_rl_torch -kf microduck_rl_torch_verification \
 		--non-dev-dependency-groups benchmark,upstream \
-		--per-rule-ignores 'DEP002=mjlab|better-actuator-models|rustypot|scipy'
+		--per-rule-ignores 'DEP002=mjlab|better-actuator-models|rustypot|scipy,DEP004=warp|matplotlib'
 
 lock-check:
 	uv lock --locked
@@ -147,10 +147,11 @@ RENDER_HEIGHT ?= 240
 RENDER_BACKEND ?= mujoco
 RENDER_CAMERA ?= free
 RENDER_DEVICE ?= cpu
-RENDER_VX ?= 0.15
+RENDER_ACTUATOR_MODE ?= xml
+RENDER_VX ?= 0.3
 RENDER_VY ?= 0.0
 RENDER_VTHETA ?= 0.0
-RENDER_GIF_FPS ?= 12
+RENDER_GIF_FPS ?= $(RENDER_FPS)
 RENDER_GIF_WIDTH ?= 720
 RENDER_GIF_COLORS ?= 48
 RENDER_CONTACTS ?= enabled
@@ -169,6 +170,7 @@ RENDER_ARGS = \
 	--width "$(RENDER_WIDTH)" \
 	--height "$(RENDER_HEIGHT)" \
 	--device "$(RENDER_DEVICE)" \
+	--actuator-mode "$(RENDER_ACTUATOR_MODE)" \
 	--render-backend "$(RENDER_BACKEND)" \
 	--camera "$(RENDER_CAMERA)" \
 	--vx "$(RENDER_VX)" --vy "$(RENDER_VY)" --vtheta "$(RENDER_VTHETA)" \
@@ -205,6 +207,7 @@ render-golden-ray: fetch-golden-policy ## Render with the pure mujoco-torch ray 
 		--render-every "$(RENDER_EVERY)" \
 		--width "$(RENDER_WIDTH)" --height "$(RENDER_HEIGHT)" \
 		--device "$(RENDER_DEVICE)" \
+		--actuator-mode "$(RENDER_ACTUATOR_MODE)" \
 		--render-backend mujoco-torch --camera head_camera \
 		--vx "$(RENDER_VX)" --vy "$(RENDER_VY)" --vtheta "$(RENDER_VTHETA)" \
 		--solver-iterations "$(RENDER_SOLVER_ITERATIONS)" \

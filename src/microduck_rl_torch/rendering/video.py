@@ -19,6 +19,42 @@ def _require_ffmpeg() -> str:
     return executable
 
 
+def _probe_video_duration(video: Path) -> float | None:
+    """Read the container duration when ffprobe is available.
+
+    ffmpeg is still the only hard requirement for conversion.  The duration
+    probe lets us preserve ordinary video lengths while retaining the
+    one-frame padding safeguard below; if ffprobe is unavailable, the
+    conversion falls back to the historical ffmpeg-only behavior.
+    """
+
+    executable = shutil.which("ffprobe")
+    if executable is None:
+        return None
+    completed = subprocess.run(  # noqa: S603
+        [
+            executable,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    try:
+        duration = float(completed.stdout.strip())
+    except ValueError:
+        return None
+    return duration if np.isfinite(duration) and duration > 0.0 else None
+
+
 class VideoWriter:
     """Stream RGB frames into an H.264 MP4 without retaining the rollout."""
 
@@ -142,7 +178,7 @@ def convert_video_to_gif(
     video: str | Path,
     gif: str | Path,
     *,
-    fps: int = 12,
+    fps: int = 25,
     width: int = 720,
     colors: int = 48,
     dither: str = "bayer",
@@ -159,7 +195,18 @@ def convert_video_to_gif(
     gif_path.parent.mkdir(parents=True, exist_ok=True)
     # A one-frame smoke-test MP4 can be shorter than one GIF frame period;
     # clone the final frame for one period so ffmpeg does not drop the stream.
+    # For normal videos, trim the temporary padding back to the source
+    # duration so conversion does not silently add one GIF frame.
     pad_duration = 1.0 / fps
+    source_duration = _probe_video_duration(video_path)
+    if source_duration is None:
+        temporal_filter = ""
+    else:
+        output_duration = max(source_duration, pad_duration)
+        temporal_filter = (
+            f"tpad=stop_mode=clone:stop_duration={pad_duration:.9g},"
+            f"trim=duration={output_duration:.9g},"
+        )
     command = [
         _require_ffmpeg(),
         "-y",
@@ -169,8 +216,7 @@ def convert_video_to_gif(
         str(video_path),
         "-filter_complex",
         (
-            f"tpad=stop_mode=clone:stop_duration={pad_duration:.9g},"
-            f"fps={fps},scale={width}:-1:flags=lanczos,split[s0][s1];"
+            f"{temporal_filter}fps={fps},scale={width}:-1:flags=lanczos,split[s0][s1];"
             f"[s0]palettegen=max_colors={colors}:stats_mode=diff[p];"
             f"[s1][p]paletteuse=dither={dither}"
         ),
