@@ -13,10 +13,11 @@ from typing import Any
 import numpy as np
 import torch
 
-from microduck_rl_torch.envs import NominalMicroDuckEnv
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
 from microduck_rl_torch.envs.model import load_microduck_model
 from microduck_rl_torch.envs.observations import command_vector
 from microduck_rl_torch.policies.huggingface import OnnxPolicy, fetch_policy
+from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 from microduck_rl_torch_verification.warp_parity import (
     WarpParityTrace,
     format_parity_table,
@@ -41,13 +42,16 @@ def _local_trace(
     # named sole geoms in robot_walk.xml. Its remaining CAD meshes are visual
     # or self-collision-only, so the mesh-to-mesh contact kernel is not part of
     # this reference rollout and should not be initialized locally.
+    task_cfg = make_microduck_velocity_env_cfg()
     bundle = load_microduck_model(
+        entity_cfg=task_cfg.scene.entities["robot"],
         device=device,
         dtype=torch.float32,
         disable_mesh_mesh_contacts=True,
     )
-    environment = NominalMicroDuckEnv(
-        bundle,
+    environment = ManagerBasedTaskEnv(
+        task_cfg,
+        bundle=bundle,
         command=command_vector(
             vx=vx,
             vy=vy,

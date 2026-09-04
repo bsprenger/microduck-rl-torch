@@ -6,7 +6,6 @@ from pathlib import Path
 
 from microduck_rl_torch.envs.scene import EntityCfg, SemanticSelector
 
-
 SERVO_JOINT_NAMES = (
     "left_hip_yaw",
     "left_hip_roll",
@@ -107,7 +106,6 @@ MICRODUCK_WALK_BACKLASH_ROBOT_CFG = _entity(
 MICRODUCK_ROLLERS_BACKLASH_ROBOT_CFG = _entity(
     "robot",
     "robot_groundcontact_rollers_backlash.xml",
-    "scene_rollers.xml",
+    "robot_groundcontact_rollers_backlash.xml",
     foot_selectors=_ROLLER_FOOT_SELECTORS,
 )
-

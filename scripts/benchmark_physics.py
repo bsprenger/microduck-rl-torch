@@ -111,6 +111,8 @@ def _run_local(
     import mujoco
     import torch
 
+    mujoco_api: Any = mujoco
+
     if _device_type(device) == "mps" and not torch.backends.mps.is_available():
         return _unsupported(
             "microduck_rl_torch",
@@ -160,10 +162,8 @@ def _run_local(
             synchronize=lambda: _torch_synchronize(bundle.device),
             repeats=repeats,
         )
-    active = (bundle.native_model.geom_contype != 0) & (
-        bundle.native_model.geom_conaffinity != 0
-    )
-    mesh_type = int(mujoco.mjtGeom.mjGEOM_MESH)
+    active = (bundle.native_model.geom_contype != 0) & (bundle.native_model.geom_conaffinity != 0)
+    mesh_type = int(mujoco_api.mjtGeom.mjGEOM_MESH)
     return {
         "backend": "microduck_rl_torch",
         "backend_label": "mujoco-torch",
@@ -175,9 +175,7 @@ def _run_local(
             "active_mesh_geom_count": int(
                 ((bundle.native_model.geom_type == mesh_type) & active).sum()
             ),
-            "allocated_contact_count": int(
-                bundle.torch_model._device_precomp.get("collision_total_contacts_py", -1)
-            ),
+            "allocated_contact_count": int(bundle.torch_model.collision_total_contacts_py),
             "mesh_mesh_contacts": mesh_mesh_contacts,
         },
         "model": bundle.fingerprint(),
@@ -196,6 +194,7 @@ def _make_upstream_config(
     steps: int,
     solver_iterations: int,
     line_search_iterations: int,
+    mesh_mesh_contacts: bool,
 ) -> Any:
     """Build the same deterministic flat single-env setup used by parity."""
 
@@ -222,6 +221,29 @@ def _make_upstream_config(
             velocity_range[key] = (0.0, 0.0)
 
     robot = deepcopy(config.scene.entities["robot"])
+    if not mesh_mesh_contacts:
+        # The walk XML uses mask (2, 2) for the three anonymous self-collision
+        # mesh geoms and (1, 1) for the two named foot meshes. Disable only the
+        # former so the benchmark retains plane-foot contacts while removing
+        # mesh-mesh narrowphase work in the Warp model.
+        import mujoco
+
+        mujoco_api: Any = mujoco
+        base_spec_fn = robot.spec_fn
+
+        def spec_without_mesh_mesh_contacts() -> Any:
+            spec = base_spec_fn()
+            for geom in spec.geoms:
+                if (
+                    geom.type == mujoco_api.mjtGeom.mjGEOM_MESH
+                    and int(geom.contype) == 2
+                    and int(geom.conaffinity) == 2
+                ):
+                    geom.contype = 0
+                    geom.conaffinity = 0
+            return spec
+
+        robot.spec_fn = spec_without_mesh_mesh_contacts
     for actuator_group in robot.articulation.actuators:
         actuator_group.delay_min_lag = 0
         actuator_group.delay_max_lag = 0
@@ -251,6 +273,7 @@ def _run_upstream(
     repeats: int,
     solver_iterations: int,
     line_search_iterations: int,
+    mesh_mesh_contacts: bool,
     seed: int,
     upstream_root: Path,
 ) -> dict[str, Any]:
@@ -270,6 +293,8 @@ def _run_upstream(
     import mujoco
     import torch
 
+    mujoco_api: Any = mujoco
+
     source_root = upstream_root.resolve() / "src"
     if source_root.is_dir() and str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
@@ -279,6 +304,7 @@ def _run_upstream(
         steps=int(controls_np.shape[0]),
         solver_iterations=solver_iterations,
         line_search_iterations=line_search_iterations,
+        mesh_mesh_contacts=mesh_mesh_contacts,
     )
     env = env_class(cfg=config, device=device)
     controls = torch.as_tensor(controls_np, device=env.device, dtype=torch.float32)
@@ -333,13 +359,13 @@ def _run_upstream(
                 ),
                 "active_mesh_geom_count": int(
                     (
-                        (env.sim.mj_model.geom_type == int(mujoco.mjtGeom.mjGEOM_MESH))
+                        (env.sim.mj_model.geom_type == int(mujoco_api.mjtGeom.mjGEOM_MESH))
                         & (env.sim.mj_model.geom_contype != 0)
                         & (env.sim.mj_model.geom_conaffinity != 0)
                     ).sum()
                 ),
                 "configured_contact_capacity": int(config.sim.nconmax),
-                "mesh_mesh_contacts": True,
+                "mesh_mesh_contacts": mesh_mesh_contacts,
             },
             "model": {
                 "timestep": float(env.physics_dt),
@@ -523,6 +549,7 @@ def _run_one(
             repeats=args.repeats,
             solver_iterations=args.solver_iterations,
             line_search_iterations=args.line_search_iterations,
+            mesh_mesh_contacts=args.mesh_mesh_contacts == "enabled",
             seed=args.seed,
             upstream_root=args.upstream_root,
         )
@@ -580,8 +607,14 @@ def _run_isolated(
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
     if worker_output.is_file():
         return json.loads(worker_output.read_text())
-    stderr = completed.stderr.strip().splitlines()
-    detail = stderr[-1] if stderr else f"worker exited with status {completed.returncode}"
+    stderr_lines = completed.stderr.strip().splitlines()
+    if stderr_lines:
+        detail = (
+            f"worker exited with status {completed.returncode}; "
+            f"stderr tail: {' | '.join(stderr_lines[-4:])}"
+        )
+    else:
+        detail = f"worker exited with status {completed.returncode}"
     return _failed(
         "microduck_rl_torch" if backend == "local" else "upstream_mujoco_warp",
         device,
@@ -611,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
         "--mesh-mesh-contacts",
         choices=("enabled", "disabled"),
         default="disabled",
-        help="Local mujoco-torch mesh-mesh collision mode; Warp keeps its upstream model mode",
+        help="Enable or disable detailed mesh-mesh collision work in both backends",
     )
     parser.add_argument("--upstream-root", type=Path, default=Path("../microduck_rl"))
     parser.add_argument(

@@ -21,4 +21,3 @@ __all__ = [
     "MICRODUCK_WALK_ROLLERS_ROBOT_CFG",
     "SERVO_JOINT_NAMES",
 ]
-

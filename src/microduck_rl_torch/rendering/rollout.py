@@ -12,10 +12,11 @@ import mujoco_torch
 import numpy as np
 import torch
 
-from microduck_rl_torch.envs import NominalMicroDuckEnv
+from microduck_rl_torch.envs import ManagerBasedTaskEnv, NominalMicroDuckEnv
 from microduck_rl_torch.envs.model import MicroDuckModelBundle, load_microduck_model
 from microduck_rl_torch.envs.observations import command_vector
 from microduck_rl_torch.policies.huggingface import OnnxPolicy, PolicyArtifact
+from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 from .video import VideoWriter, convert_video_to_gif
 
@@ -133,7 +134,9 @@ def render_policy_rollout(
     if render_backend == "mujoco-torch" and camera == "free":
         raise ValueError("The mujoco-torch renderer requires --camera head_camera")
 
+    task_cfg = make_microduck_velocity_env_cfg()
     bundle = load_microduck_model(
+        entity_cfg=task_cfg.scene.entities["robot"],
         device=device,
         dtype=dtype,
         fixed_iterations=fixed_iterations,
@@ -142,9 +145,11 @@ def render_policy_rollout(
         disable_contacts=disable_contacts,
         disable_mesh_mesh_contacts=disable_mesh_mesh_contacts,
     )
-    environment = NominalMicroDuckEnv(
-        bundle,
+    environment = ManagerBasedTaskEnv(
+        task_cfg,
+        bundle=bundle,
         command=command_vector(vx=vx, vy=vy, vtheta=vtheta, device=bundle.device),
+        domain_randomization=False,
     )
     if seconds is not None:
         control_timestep = bundle.timestep * environment.decimation

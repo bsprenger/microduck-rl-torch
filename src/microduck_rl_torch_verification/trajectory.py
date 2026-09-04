@@ -10,8 +10,9 @@ from typing import Any
 import numpy as np
 import torch
 
-from microduck_rl_torch.envs import NominalMicroDuckEnv
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
 from microduck_rl_torch.envs.model import MicroDuckModelBundle
+from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 from .native import NativeMicroDuckEnv
 
@@ -187,7 +188,14 @@ def rollout_torch(
             f"fixture={expected_contacts}, bundle={bundle.contacts_enabled}"
         )
     action_delay_lag = int(trajectory.metadata.get("action_delay_lag", 0))
-    environment = NominalMicroDuckEnv(bundle, command=command, action_delay_lag=action_delay_lag)
+    task_cfg = make_microduck_velocity_env_cfg()
+    task_cfg.actions.delay_lag = action_delay_lag
+    environment = ManagerBasedTaskEnv(
+        task_cfg,
+        bundle=bundle,
+        command=command,
+        domain_randomization=False,
+    )
     observations = [environment.reset().detach().cpu().numpy()]
     if environment.state is None:
         raise RuntimeError("Environment runtime state disappeared during reset")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import mujoco
@@ -17,9 +17,19 @@ from .actuation import (
     motor_torque,
 )
 from .config import MicroDuckVelocityConfig, sample_command, sample_twist, sample_uniform
-from .model import MicroDuckModelBundle
+from .managers import (
+    ActionManager,
+    CommandManager,
+    CurriculumManager,
+    EventManager,
+    ObservationManager,
+    RewardManager,
+    TerminationManager,
+)
+from .model import MicroDuckModelBundle, load_microduck_model
 from .observations import build_actor_observation
 from .rewards import compute_reward, foot_contact_mask
+from .task_config import TaskEnvCfg
 
 mujoco_api: Any = mujoco
 
@@ -55,6 +65,11 @@ class MicroDuckRuntimeState:
     next_head_step: int
     next_body_step: int
     reward_terms: dict[str, torch.Tensor]
+    # Optional task-owned state for future phases, props, and state machines.
+    # The velocity task leaves this empty; future task factories can allocate
+    # ball, sit/stand, roller, or roulade state without changing the generic
+    # physics state schema.
+    task_data: dict[str, Any] = field(default_factory=dict)
 
 
 def _quat_from_euler(roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Tensor) -> torch.Tensor:
@@ -129,6 +144,16 @@ class NominalMicroDuckEnv:
         self.step_count = 0
         self._generator: torch.Generator | None = None
         self._bam_runtime: BamRuntime | None = None
+        # These are installed by ManagerBasedTaskEnv.  Keeping the attributes
+        # on the legacy runtime makes the delegation points explicit and keeps
+        # the old NominalMicroDuckEnv API behavior unchanged.
+        self.action_manager: ActionManager | None = None
+        self.command_manager: CommandManager | None = None
+        self.observation_manager: ObservationManager | None = None
+        self.reward_manager: RewardManager | None = None
+        self.termination_manager: TerminationManager | None = None
+        self.event_manager: EventManager | None = None
+        self.curriculum_manager: CurriculumManager | None = None
 
     def _random(self, *, dtype: torch.dtype | None = None) -> torch.Tensor:
         return torch.rand(
@@ -260,7 +285,9 @@ class NominalMicroDuckEnv:
                 self.bundle.native_model.body_ipos[body_id] += delta.detach().cpu().numpy()
         if self.config.randomize_foot_friction:
             foot_scale = self._sample_range(*randomization.foot_friction_range)
-            foot_ids = list(self.bundle.foot_geom_ids)
+            foot_ids = sorted(
+                {geom_id for group in self.bundle.foot_geom_groups for geom_id in group}
+            )
             self.bundle.torch_model.geom_friction[foot_ids] = (
                 self._base_geom_friction[foot_ids] * foot_scale
             )
@@ -436,6 +463,8 @@ class NominalMicroDuckEnv:
             self.state.imu_quaternion = torch.cat(
                 (torch.cos(half).reshape(1), axis * torch.sin(half))
             )
+        if self.event_manager is not None:
+            self.event_manager.apply(self, "reset")
         return self.observation()
 
     def _next_interval_step(self, interval: tuple[float, float]) -> int:
@@ -460,7 +489,7 @@ class NominalMicroDuckEnv:
             ) * scale
         return noise
 
-    def observation(self) -> torch.Tensor:
+    def _build_actor_observation(self) -> torch.Tensor:
         if self.data is None or self.state is None:
             raise RuntimeError("Call reset() before observation()")
         imu_index = max(0, len(self.state.imu_ang_vel_history) - 1 - self.state.imu_lag)
@@ -478,6 +507,11 @@ class NominalMicroDuckEnv:
             imu_quaternion=self.state.imu_quaternion,
             noise=self._observation_noise(torch.Size((61,))),
         )
+
+    def observation(self) -> torch.Tensor:
+        if self.observation_manager is not None:
+            return self.observation_manager.compute(self, "actor")
+        return self._build_actor_observation()
 
     def _bam_control(self, target: torch.Tensor) -> torch.Tensor:
         if self.data is None or self._bam_runtime is None or self.bundle.bam_parameters is None:
@@ -546,15 +580,21 @@ class NominalMicroDuckEnv:
             raise ValueError(f"Expected action shape (14,), got {tuple(action.shape)}")
         if not torch.isfinite(action).all():
             raise ValueError("Action contains non-finite values")
-        self._apply_push()
+        if self.event_manager is not None:
+            self.event_manager.apply(self, "pre_physics")
+        else:
+            self._apply_push()
         previous_foot_contact = self.state.foot_contact.clone()
         previous_foot_air_time = self.state.foot_air_time.clone()
-        self.state.previous_joint_velocity = self._encoder_velocity().clone()
-        self.state.previous_action = self.state.last_action.clone()
-        self.state.delay_buffer[self.step_count % len(self.state.delay_buffer)] = action.clone()
-        delayed_index = (self.step_count - self.state.delay_lag) % len(self.state.delay_buffer)
-        applied_action = self.state.delay_buffer[delayed_index]
-        target = self.bundle.default_pose + self.action_scale * applied_action
+        if self.action_manager is not None:
+            applied_action, target = self.action_manager.prepare(self, action)
+        else:
+            self.state.previous_joint_velocity = self._encoder_velocity().clone()
+            self.state.previous_action = self.state.last_action.clone()
+            self.state.delay_buffer[self.step_count % len(self.state.delay_buffer)] = action.clone()
+            delayed_index = (self.step_count - self.state.delay_lag) % len(self.state.delay_buffer)
+            applied_action = self.state.delay_buffer[delayed_index]
+            target = self.bundle.default_pose + self.action_scale * applied_action
         for _ in range(self.decimation):
             if self.actuator_mode == "bam":
                 torque = self._bam_control(target)
@@ -595,7 +635,9 @@ class NominalMicroDuckEnv:
             and self.step_count % self.config.delay_update_period == 0
         ):
             self.state.imu_lag = self._sample_delay(*self.config.imu_delay_lag)
-        if self.domain_randomization and not self._fixed_command:
+        if self.command_manager is not None:
+            self.command_manager.step(self)
+        elif self.domain_randomization and not self._fixed_command:
             command_config = self.config.command
             if self.step_count >= self.state.next_twist_step:
                 sampled = sample_twist(
@@ -629,18 +671,29 @@ class NominalMicroDuckEnv:
                     command_config.body_resample_seconds
                 )
         observation = self.observation()
-        reward, terms = compute_reward(
-            self.bundle,
-            self.data,
-            command=self.command,
-            action=action,
-            previous_action=self.state.previous_action,
-            previous_foot_positions=self.state.previous_foot_positions,
-            foot_air_time=previous_foot_air_time,
-            foot_contact=current_contact,
-            config=self.config.rewards,
-            foot_touchdown=touchdown,
-        )
+        reward_values = {
+            "action": action,
+            "previous_action": self.state.previous_action,
+            "previous_foot_positions": self.state.previous_foot_positions,
+            "foot_air_time": previous_foot_air_time,
+            "foot_contact": current_contact,
+            "foot_touchdown": touchdown,
+        }
+        if self.reward_manager is not None:
+            reward, terms = self.reward_manager.compute(self, **reward_values)
+        else:
+            reward, terms = compute_reward(
+                self.bundle,
+                self.data,
+                command=self.command,
+                action=action,
+                previous_action=self.state.previous_action,
+                previous_foot_positions=self.state.previous_foot_positions,
+                foot_air_time=previous_foot_air_time,
+                foot_contact=current_contact,
+                config=self.config.rewards,
+                foot_touchdown=touchdown,
+            )
         self.state.reward_terms = terms
         self.state.previous_foot_positions = self.data.site_xpos[
             list(self.bundle.foot_site_ids)
@@ -662,14 +715,30 @@ class NominalMicroDuckEnv:
                 )
             )
         )
-        bad_orientation = bool(cos_tilt < bad_limit)
-        terminated = not finite or bad_orientation
-        truncated = self.step_count >= self.config.episode_length_steps
+        bad_orientation_value = bool(cos_tilt < bad_limit)
+        if self.termination_manager is not None:
+            terminated, truncated, termination_values = self.termination_manager.evaluate(
+                self, finite=finite
+            )
+            bad_orientation_value = termination_values.get("bad_orientation", False)
+        else:
+            terminated = not finite or bad_orientation_value
+            truncated = self.step_count >= self.config.episode_length_steps
+            termination_values = {
+                "non_finite": not finite,
+                "bad_orientation": bad_orientation_value,
+                "timeout": truncated,
+            }
+        if self.event_manager is not None:
+            self.event_manager.apply(self, "post_physics")
+        if self.curriculum_manager is not None:
+            self.curriculum_manager.step(self)
         info: dict[str, Any] = {
             "step": self.step_count,
             "time": float(self.data.time),
             "finite": finite,
-            "bad_orientation": bad_orientation,
+            "bad_orientation": bad_orientation_value,
+            "terminations": termination_values,
             "reward_terms": {name: float(value) for name, value in terms.items()},
             "applied_action": applied_action.detach().clone(),
         }
@@ -692,3 +761,65 @@ class NominalMicroDuckEnv:
             "sensordata": self.data.sensordata.detach().clone(),
             "time": float(self.data.time),
         }
+
+
+class ManagerBasedTaskEnv(NominalMicroDuckEnv):
+    """Composition-based Torch runtime for an upstream-shaped task config.
+
+    The physics implementation remains the parity-tested scalar runtime in
+    ``NominalMicroDuckEnv``.  This class supplies the manager graph and model
+    selection from ``TaskEnvCfg`` so future task factories can mutate scene,
+    entity, command, observation, reward, event, and termination behavior
+    without creating another monolithic environment subclass.
+    """
+
+    def __init__(
+        self,
+        task_cfg: TaskEnvCfg,
+        *,
+        bundle: MicroDuckModelBundle | None = None,
+        command: torch.Tensor | None = None,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype = torch.float32,
+        domain_randomization: bool | None = None,
+        **load_options: Any,
+    ) -> None:
+        if "robot" not in task_cfg.scene.entities:
+            raise ValueError("Task scene must contain a named 'robot' entity")
+        robot_cfg = task_cfg.scene.entities["robot"]
+        if bundle is None:
+            bundle = load_microduck_model(
+                entity_cfg=robot_cfg,
+                device=device,
+                dtype=dtype,
+                actuator_mode=task_cfg.actions.actuator_mode,
+                **load_options,
+            )
+        super().__init__(
+            bundle,
+            command=command,
+            action_scale=task_cfg.actions.scale,
+            config=task_cfg.runtime,
+            actuator_mode=task_cfg.actions.actuator_mode,
+            action_delay_lag=task_cfg.actions.delay_lag,
+            domain_randomization=(
+                task_cfg.metadata.get("domain_randomization", False)
+                if domain_randomization is None
+                else domain_randomization
+            ),
+        )
+        if task_cfg.action_size != bundle.action_size:
+            raise ValueError(
+                f"Task declares {task_cfg.action_size} actions, model exposes {bundle.action_size}"
+            )
+        self.task_cfg = task_cfg
+        self.action_manager = ActionManager(task_cfg.actions)
+        self.command_manager = CommandManager(task_cfg.commands)
+        self.observation_manager = ObservationManager(task_cfg.observations)
+        self.reward_manager = RewardManager(task_cfg.rewards)
+        self.termination_manager = TerminationManager(task_cfg.terminations)
+        self.event_manager = EventManager(task_cfg.events)
+        self.curriculum_manager = CurriculumManager(task_cfg.curriculum)
+
+
+__all__ = ["EnvStep", "ManagerBasedTaskEnv", "MicroDuckRuntimeState", "NominalMicroDuckEnv"]

@@ -9,15 +9,15 @@ loading MuJoCo.
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Callable, MutableMapping
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Callable, MutableMapping
+from typing import Any
 
 import torch
 
-from .config import CommandConfig, MicroDuckVelocityConfig
+from .config import CommandConfig
 from .scene import SceneCfg
-
 
 TermFunction = Callable[[Any], torch.Tensor]
 
@@ -31,7 +31,7 @@ class TermCfg:
     params: dict[str, Any] = field(default_factory=dict)
     enabled: bool = True
 
-    def clone(self) -> "TermCfg":
+    def clone(self) -> TermCfg:
         return deepcopy(self)
 
 
@@ -71,7 +71,7 @@ class TermCollection(MutableMapping[str, TermCfg]):
     def remove(self, name: str) -> None:
         del self[name]
 
-    def clone(self) -> "TermCollection":
+    def clone(self) -> TermCollection:
         return TermCollection(OrderedDict((name, term.clone()) for name, term in self.items()))
 
     @property
@@ -93,7 +93,7 @@ class ObservationGroupCfg:
 class ObservationGroupsCfg:
     groups: dict[str, ObservationGroupCfg] = field(default_factory=dict)
 
-    def clone(self) -> "ObservationGroupsCfg":
+    def clone(self) -> ObservationGroupsCfg:
         return deepcopy(self)
 
 
@@ -118,7 +118,9 @@ class TaskEnvCfg:
     terminations: TermCollection
     events: TermCollection
     curriculum: TermCollection
-    runtime: MicroDuckVelocityConfig
+    # The first task uses MicroDuckVelocityConfig. Future task families may
+    # add their own runtime state/configuration without changing this schema.
+    runtime: Any
     play: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -126,10 +128,9 @@ class TaskEnvCfg:
     def action_size(self) -> int:
         return self.actions.size
 
-    def clone(self) -> "TaskEnvCfg":
+    def clone(self) -> TaskEnvCfg:
         return deepcopy(self)
 
 
 def empty_terms() -> TermCollection:
     return TermCollection()
-

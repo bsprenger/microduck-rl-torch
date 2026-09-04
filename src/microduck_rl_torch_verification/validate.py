@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from microduck_rl_torch.envs import NominalMicroDuckEnv, default_scene_path
+from microduck_rl_torch.envs import ManagerBasedTaskEnv, default_scene_path
 from microduck_rl_torch.envs.model import load_microduck_model
 from microduck_rl_torch.envs.observations import command_vector
 from microduck_rl_torch.policies.huggingface import (
@@ -20,6 +20,7 @@ from microduck_rl_torch.policies.huggingface import (
     fetch_policy,
     validate_policy_artifact,
 )
+from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 from .native import NativeMicroDuckEnv
 
@@ -72,17 +73,21 @@ def validate(
 ) -> dict[str, Any]:
     if steps < 1:
         raise ValueError("steps must be positive")
+    task_cfg = make_microduck_velocity_env_cfg()
     bundle = load_microduck_model(
         xml_path,
+        entity_cfg=task_cfg.scene.entities["robot"],
         device=device,
         fixed_iterations=fixed_iterations,
         solver_iterations=solver_iterations,
         line_search_iterations=line_search_iterations,
         disable_contacts=disable_contacts,
     )
-    torch_env = NominalMicroDuckEnv(
-        bundle,
+    torch_env = ManagerBasedTaskEnv(
+        task_cfg,
+        bundle=bundle,
         command=command_vector(vx=0.15, device=bundle.device),
+        domain_randomization=False,
     )
     native_env = NativeMicroDuckEnv(
         xml_path,

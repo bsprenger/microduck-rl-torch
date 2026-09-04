@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-
 SelectorMode = Literal["names", "regex", "body_subtree"]
 
 
@@ -97,4 +96,3 @@ class SceneCfg:
     sensors: dict[str, SensorCfg] = field(default_factory=dict)
     scene_xml: Path | None = None
     contact_options: dict[str, Any] = field(default_factory=dict)
-

@@ -141,6 +141,23 @@ the public ONNX deployment policy, BAM M6 control path, 61D observations, reset 
 reward terms, and native golden trajectory are implemented without reconstructing a private
 training checkpoint. TorchRL trainer/checkpoint parity remains a separate layer.
 
+The task layer now mirrors the upstream composition boundary without importing its registration
+system. The first directly-instantiated task is `Mjlab-Velocity-Flat-MicroDuck`:
+
+```python
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
+from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
+
+cfg = make_microduck_velocity_env_cfg(play=False, rough=False)
+env = ManagerBasedTaskEnv(cfg)
+observation = env.reset(seed=0)
+```
+
+Task configurations own scene/entity selection and ordered action, observation, reward, termination,
+event, and curriculum terms. `ManagerBasedTaskEnv` executes those terms through explicit managers;
+`NominalMicroDuckEnv` remains available for compatibility. See
+[`docs/architecture.md`](docs/architecture.md) for the model variant and mutation conventions.
+
 The intended destination is a single PyTorch workflow that can be prototyped on CPU or Apple MPS,
 compiled locally where supported, and then run unchanged for long CUDA or Hugging Face Jobs
 training runs. The training entry point and Hugging Face Jobs launcher are coming soon; the
@@ -309,10 +326,12 @@ Run the local `mujoco-torch` and upstream MuJoCo-Warp backends on every requeste
 make benchmark-physics UPSTREAM_ROOT=/path/to/microduck_rl
 ```
 
-The default local benchmark disables detailed mesh-mesh contacts to measure the stable rollout
-path. Use `BENCHMARK_MESH_MESH_CONTACTS=enabled` to include the local convex-SAT path; the
-upstream Warp benchmark always uses the collision masks from its robot model, including the
-self-collision mesh geoms.
+The default benchmark disables detailed mesh-mesh contacts in both backends to measure the stable
+ground-contact path. Use `BENCHMARK_MESH_MESH_CONTACTS=enabled` to include the full mesh path. For
+the upstream Warp cell, the disabled setting clears only the `(contype, conaffinity) = (2, 2)`
+self-collision mesh geoms in the copied model; the named foot meshes remain active for plane-foot
+contacts. Thus the enabled comparison retains the same six active collision geoms (five meshes)
+in both models, while the disabled comparison isolates the mesh-mesh narrowphase cost.
 
 This writes machine-readable results to `artifacts/benchmarks/physics-single-env/` and refreshes
 the graph below. On a host without Apple MPS, the MPS cells are recorded as unsupported rather

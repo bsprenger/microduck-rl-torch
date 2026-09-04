@@ -29,10 +29,11 @@ def foot_contact_mask(data: Any, bundle: MicroDuckModelBundle) -> torch.Tensor:
     geom1 = data.contact.geom1
     geom2 = data.contact.geom2
     result = []
-    for foot_id in bundle.foot_geom_ids:
+    for foot_group in bundle.foot_geom_groups:
+        foot_ids = torch.as_tensor(foot_group, device=geom1.device)
         result.append(
             valid
-            & ((geom1 == foot_id) | (geom2 == foot_id))
+            & (torch.isin(geom1, foot_ids) | torch.isin(geom2, foot_ids))
             & (data.contact.dist <= data.contact.includemargin)
         )
     return torch.stack([mask.any() for mask in result])
@@ -61,7 +62,7 @@ def _body_linear_velocity(data: Any, bundle: MicroDuckModelBundle) -> torch.Tens
     return data.cvel[bundle.trunk_body_id, 3:6]
 
 
-def compute_reward(
+def compute_velocity_reward_terms(
     bundle: MicroDuckModelBundle,
     data: Any,
     *,
@@ -73,8 +74,13 @@ def compute_reward(
     foot_contact: torch.Tensor,
     config: RewardConfig,
     foot_touchdown: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Compute the configured upstream reward terms for one scalar environment."""
+) -> dict[str, torch.Tensor]:
+    """Compute raw upstream velocity terms for one scalar environment.
+
+    Keeping raw terms separate from their weights is what lets the generic
+    ``RewardManager`` add, replace, or remove terms without embedding a task's
+    reward policy in the physics layer.
+    """
 
     q = data.qpos.index_select(-1, bundle.qpos_indices)
     q_error = q - bundle.default_pose
@@ -154,19 +160,50 @@ def compute_reward(
         "foot_swing_height": foot_swing_height,
         "self_collisions": self_collisions,
     }
-    weighted = (
-        config.pose * pose
-        + config.upright * upright
-        + config.track_linear_velocity * track_linear_velocity
-        + config.track_angular_velocity * track_angular_velocity
-        + config.air_time * air_time
-        + config.head_pose_tracking * head_pose_tracking
-        + config.foot_slip * foot_slip
-        + config.body_ang_vel * body_ang_vel
-        + config.angular_momentum * angular_momentum
-        + config.action_rate_l2 * action_rate_l2
-        + config.foot_clearance * foot_clearance
-        + config.foot_swing_height * foot_swing_height
-        + config.self_collisions * self_collisions
+    return terms
+
+
+def compute_reward(
+    bundle: MicroDuckModelBundle,
+    data: Any,
+    *,
+    command: torch.Tensor,
+    action: torch.Tensor,
+    previous_action: torch.Tensor,
+    previous_foot_positions: torch.Tensor,
+    foot_air_time: torch.Tensor,
+    foot_contact: torch.Tensor,
+    config: RewardConfig,
+    foot_touchdown: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Compatibility wrapper returning the historical weighted reward."""
+
+    terms = compute_velocity_reward_terms(
+        bundle,
+        data,
+        command=command,
+        action=action,
+        previous_action=previous_action,
+        previous_foot_positions=previous_foot_positions,
+        foot_air_time=foot_air_time,
+        foot_contact=foot_contact,
+        config=config,
+        foot_touchdown=foot_touchdown,
     )
+    weights = {
+        "pose": config.pose,
+        "upright": config.upright,
+        "track_linear_velocity": config.track_linear_velocity,
+        "track_angular_velocity": config.track_angular_velocity,
+        "air_time": config.air_time,
+        "head_pose_tracking": config.head_pose_tracking,
+        "foot_slip": config.foot_slip,
+        "body_ang_vel": config.body_ang_vel,
+        "angular_momentum": config.angular_momentum,
+        "action_rate_l2": config.action_rate_l2,
+        "foot_clearance": config.foot_clearance,
+        "foot_swing_height": config.foot_swing_height,
+        "self_collisions": config.self_collisions,
+    }
+    weighted = torch.stack([terms[name] * weight for name, weight in weights.items()]).sum()
     return weighted.to(dtype=torch.float32), terms
