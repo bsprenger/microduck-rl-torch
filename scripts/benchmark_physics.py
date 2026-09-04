@@ -326,7 +326,10 @@ def _run_upstream(
             "semantics": "direct env.sim.step; one single-environment physics timestep",
             "collision": {
                 "active_geom_count": int(
-                    ((env.sim.mj_model.geom_contype != 0) & (env.sim.mj_model.geom_conaffinity != 0)).sum()
+                    (
+                        (env.sim.mj_model.geom_contype != 0)
+                        & (env.sim.mj_model.geom_conaffinity != 0)
+                    ).sum()
                 ),
                 "active_mesh_geom_count": int(
                     (
