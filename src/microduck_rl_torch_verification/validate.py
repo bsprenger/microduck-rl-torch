@@ -10,24 +10,38 @@ from typing import Any
 import numpy as np
 import torch
 
-from microduck_rl_torch.envs import NominalMicroDuckEnv, default_scene_path
-from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
+from microduck_rl_torch.envs.model import load_model_bundle
 from microduck_rl_torch.envs.observations import command_vector
 from microduck_rl_torch.policies.huggingface import (
     OFFICIAL_POLICY_REPO,
     OnnxPolicy,
     PolicyArtifact,
     fetch_policy,
-    validate_policy_artifact,
+    load_policy,
+    resolve_policy_filename,
 )
+from microduck_rl_torch.robot import MICRODUCK_WALK_ROBOT_CFG
+from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 from .native import NativeMicroDuckEnv
 
 
+def _tensor_observation(value: object) -> torch.Tensor:
+    if isinstance(value, dict):
+        raise RuntimeError("Environment validation requires a concatenated observation")
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"Expected a tensor observation, got {type(value).__name__}")
+    return value
+
+
 def _local_artifact(policy_dir: Path, policy: str) -> tuple[Path, Path]:
-    filename = policy if policy.endswith(".onnx") else f"{policy}.onnx"
-    policy_path = policy_dir / filename
     manifest_path = policy_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Expected {manifest_path}; run make fetch-golden-policy first")
+    manifest = json.loads(manifest_path.read_text())
+    filename = resolve_policy_filename(manifest, policy)
+    policy_path = policy_dir / filename
     if not policy_path.is_file() or not manifest_path.is_file():
         raise FileNotFoundError(
             f"Expected {policy_path} and {manifest_path}; run make fetch-golden-policy first"
@@ -37,21 +51,28 @@ def _local_artifact(policy_dir: Path, policy: str) -> tuple[Path, Path]:
 
 def _artifact_from_local(policy_dir: Path, policy: str) -> PolicyArtifact:
     policy_path, manifest_path = _local_artifact(policy_dir, policy)
-    metadata = validate_policy_artifact(policy_path, manifest_path)
-    manifest = json.loads(manifest_path.read_text())
-    provenance_path = policy_dir / "artifact.json"
+    provenance_path = policy_dir / "download.json"
     provenance = json.loads(provenance_path.read_text()) if provenance_path.is_file() else {}
-    return PolicyArtifact(
+    artifact = load_policy(
+        policy_path,
+        manifest_path,
         repo_id=provenance.get("repo_id", OFFICIAL_POLICY_REPO),
         revision=provenance.get("revision", "local-artifact"),
-        policy_name=policy_path.name,
-        policy_path=policy_path,
-        manifest_path=manifest_path,
-        manifest=manifest,
-        sha256=metadata["sha256"],
-        input_name=metadata["input_name"],
-        output_name=metadata["output_name"],
     )
+    policy_records = provenance.get("policies")
+    if isinstance(policy_records, dict):
+        if policy_path.name not in policy_records:
+            raise ValueError(
+                f"Policy {policy_path.name} is not part of the downloaded set in {provenance_path}"
+            )
+        record = policy_records[policy_path.name]
+        expected_sha256 = record.get("sha256") if isinstance(record, dict) else None
+        if expected_sha256 and expected_sha256 != artifact.sha256:
+            raise ValueError(
+                f"Policy digest does not match {provenance_path}: "
+                f"expected {expected_sha256}, got {artifact.sha256}"
+            )
+    return artifact
 
 
 def _max_abs(left: Any, right: Any) -> float:
@@ -72,20 +93,31 @@ def validate(
 ) -> dict[str, Any]:
     if steps < 1:
         raise ValueError("steps must be positive")
-    bundle = load_microduck_model(
+    if artifact.policy_name != "alpha_walking.onnx":
+        raise ValueError(
+            "This validation entry point constructs the velocity task and only supports "
+            "alpha_walking.onnx; construct the matching task environment and wire "
+            "OnnxPolicy explicitly for other policies"
+        )
+    task_cfg = make_microduck_velocity_env_cfg()
+    bundle = load_model_bundle(
         xml_path,
+        entity_cfg=task_cfg.scene.entities["robot"],
         device=device,
         fixed_iterations=fixed_iterations,
         solver_iterations=solver_iterations,
         line_search_iterations=line_search_iterations,
         disable_contacts=disable_contacts,
     )
-    torch_env = NominalMicroDuckEnv(
-        bundle,
+    torch_env = ManagerBasedTaskEnv(
+        task_cfg,
+        bundle=bundle,
         command=command_vector(vx=0.15, device=bundle.device),
+        domain_randomization=False,
     )
     native_env = NativeMicroDuckEnv(
         xml_path,
+        bundle=bundle,
         timestep=bundle.timestep,
         decimation=bundle.decimation,
         solver_iterations=bundle.solver_iterations,
@@ -93,7 +125,7 @@ def validate(
         disable_contacts=not bundle.contacts_enabled,
     )
     native_env.command[:] = torch_env.command.detach().cpu().numpy()
-    torch_observation = torch_env.reset().detach().cpu()
+    torch_observation = _tensor_observation(torch_env.reset()).detach().cpu()
     native_observation = torch.from_numpy(native_env.reset())
     initial_observation_error = _max_abs(torch_observation, native_observation)
 
@@ -112,7 +144,7 @@ def validate(
         actions.append(action_np)
         native_observation = torch.from_numpy(native_env.step(action_np))
         result = torch_env.step(action)
-        torch_observation = result.observation.detach().cpu()
+        torch_observation = _tensor_observation(result.observation).detach().cpu()
         max_observation_error = max(
             max_observation_error, _max_abs(torch_observation, native_observation)
         )
@@ -158,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy-dir", type=Path, default=Path("artifacts/hf"))
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--xml", type=Path, default=default_scene_path())
+    parser.add_argument("--xml", type=Path, default=MICRODUCK_WALK_ROBOT_CFG.keyframe_source)
     parser.add_argument("--fixed-iterations", action="store_true")
     parser.add_argument("--solver-iterations", type=int)
     parser.add_argument("--line-search-iterations", type=int)

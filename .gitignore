@@ -10,6 +10,9 @@ build/
 *.egg-info/
 __pycache__/
 .DS_Store
+*.log
+*.LOG
+*.ses
 
 # Downloaded policies and generated traces are reproducible artifacts.
 artifacts/
@@ -18,4 +21,3 @@ benchmarks/results/
 # Local Hugging Face and uv caches.
 .cache/
 .hf-cache/
-

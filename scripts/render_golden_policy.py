@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the official Hugging Face MicroDuck policy in the Torch environment."""
+"""Render the official Hugging Face Microduck policy in the Torch environment."""
 
 from microduck_rl_torch.rendering.cli import main
 

@@ -16,6 +16,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --all-groups
+      - run: make format-check
       - run: make check
+      - run: make archive-check
       - run: make test
-

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download the official MicroDuck policy and its manifest."""
+"""Download the official Microduck policy and its manifest."""
 
 from microduck_rl_torch.policies.huggingface import main
 

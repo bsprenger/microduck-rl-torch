@@ -32,9 +32,7 @@
         0 0 0 0 0 0 0 0
         0 0 0 0 0 0 0 0 0 0"
         ctrl="0 0 0 0 0 0 0 0 0 0 0 0 0 0"/>
-        <!-- STAND2: trunk shifted ~5mm forward (CoM over ankle axis). Leg pitch
-             leaned forward vs old STAND: hip_pitch 30->26.24deg, ankle 30->25.95deg,
-             knee 0->0.28deg. -->
+        <!-- STAND keeps the trunk approximately 5 mm forward of the ankle axis. -->
         <key name="STAND" qpos="
         0 0 0.12 1 0 0 0
 
