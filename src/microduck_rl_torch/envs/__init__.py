@@ -1,11 +1,16 @@
-"""MicroDuck environment and observation helpers."""
+"""MicroDuck environment, task configuration, and observation helpers."""
 
-from .core import EnvStep, NominalMicroDuckEnv
+from .actuation import BamM6Parameters
+from .config import MicroDuckVelocityConfig
+from .core import EnvStep, MicroDuckRuntimeState, NominalMicroDuckEnv
 from .model import MicroDuckModelBundle, default_scene_path
 
 __all__ = [
     "EnvStep",
+    "BamM6Parameters",
     "MicroDuckModelBundle",
+    "MicroDuckRuntimeState",
+    "MicroDuckVelocityConfig",
     "NominalMicroDuckEnv",
     "default_scene_path",
 ]

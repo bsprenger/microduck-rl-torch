@@ -86,6 +86,7 @@ def validate(
     )
     native_env = NativeMicroDuckEnv(
         xml_path,
+        bundle=bundle,
         timestep=bundle.timestep,
         decimation=bundle.decimation,
         solver_iterations=bundle.solver_iterations,

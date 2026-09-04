@@ -54,6 +54,14 @@ def _quat_rotate_inverse(quaternion: torch.Tensor, vector: torch.Tensor) -> torc
     return vector - quaternion[..., :1] * t + torch.cross(xyz, t, dim=-1)
 
 
+def _quat_apply(quaternion: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+    """Rotate vectors by quaternions in ``[w, x, y, z]`` order."""
+
+    xyz = quaternion[..., 1:]
+    t = 2.0 * torch.cross(xyz, vector, dim=-1)
+    return vector + quaternion[..., :1] * t + torch.cross(xyz, t, dim=-1)
+
+
 def _expand_last(value: torch.Tensor, batch_shape: torch.Size) -> torch.Tensor:
     if value.ndim == 1:
         return value.expand(*batch_shape, value.shape[-1])
@@ -69,20 +77,43 @@ def build_actor_observation(
     data: Any,
     last_action: torch.Tensor,
     command: torch.Tensor,
+    *,
+    joint_position: torch.Tensor | None = None,
+    joint_position_bias: torch.Tensor | None = None,
+    joint_velocity: torch.Tensor | None = None,
+    base_ang_vel: torch.Tensor | None = None,
+    projected_gravity: torch.Tensor | None = None,
+    imu_quaternion: torch.Tensor | None = None,
+    noise: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Build `[base_ang_vel, projected_gravity, q, dq, action, command]`."""
+    """Build the upstream 61D actor observation.
+
+    The optional values are the runtime sensor path: delayed joint velocity,
+    encoder bias, IMU misalignment, and observation noise.  Leaving them unset
+    preserves the deterministic nominal observation used by structural tests.
+    """
 
     qpos_indices = bundle.qpos_indices.to(data.qpos.device)
     qvel_indices = bundle.qvel_indices.to(data.qvel.device)
-    base_ang_vel = data.sensordata[..., bundle.sensor_slices["imu_ang_vel"]]
+    if base_ang_vel is None:
+        base_ang_vel = data.sensordata[..., bundle.sensor_slices["imu_ang_vel"]]
     quaternion = data.xquat[..., bundle.trunk_body_id, :]
     gravity_world = torch.zeros(
         (*quaternion.shape[:-1], 3), dtype=data.qpos.dtype, device=data.qpos.device
     )
     gravity_world[..., 2] = -1.0
-    projected_gravity = _quat_rotate_inverse(quaternion, gravity_world)
-    joint_position = data.qpos.index_select(-1, qpos_indices) - bundle.default_pose
-    joint_velocity = data.qvel.index_select(-1, qvel_indices)
+    if projected_gravity is None:
+        projected_gravity = _quat_rotate_inverse(quaternion, gravity_world)
+    if joint_position_bias is None:
+        joint_position_bias = torch.zeros_like(bundle.default_pose)
+    if joint_position is None:
+        joint_position = data.qpos.index_select(-1, qpos_indices)
+    joint_position = joint_position + joint_position_bias - bundle.default_pose
+    if joint_velocity is None:
+        joint_velocity = data.qvel.index_select(-1, qvel_indices)
+    if imu_quaternion is not None:
+        base_ang_vel = _quat_apply(imu_quaternion, base_ang_vel)
+        projected_gravity = _quat_apply(imu_quaternion, projected_gravity)
     batch_shape = data.qpos.shape[:-1]
     action = _expand_last(torch.as_tensor(last_action, device=data.qpos.device), batch_shape)
     command = _expand_last(torch.as_tensor(command, device=data.qpos.device), batch_shape)
@@ -91,4 +122,11 @@ def build_actor_observation(
     )
     if observation.shape[-1] != bundle.observation_size:
         raise RuntimeError(f"Built observation of size {observation.shape[-1]}, expected 61")
+    if noise is not None:
+        if noise.shape != observation.shape:
+            raise ValueError(
+                "Expected observation noise shape "
+                f"{tuple(observation.shape)}, got {tuple(noise.shape)}"
+            )
+        observation = observation + noise
     return observation.to(dtype=torch.float32)

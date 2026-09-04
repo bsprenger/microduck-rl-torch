@@ -3,6 +3,7 @@ import torch
 
 from microduck_rl_torch.envs import NominalMicroDuckEnv
 from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs.rewards import foot_contact_mask
 
 
 @pytest.mark.integration
@@ -37,3 +38,12 @@ def test_environment_contact_path_is_finite():
     assert torch.isfinite(observation).all()
     assert torch.isfinite(result.observation).all()
     assert result.info["finite"]
+
+    assert environment.data is not None
+    assert environment.data.contact.geom1.ndim == 1
+    assert environment.data.contact.geom1.shape == environment.data.contact.geom2.shape
+    assert torch.isfinite(environment.data.contact.dist).all()
+    assert torch.isfinite(environment.data.contact.pos).all()
+    assert torch.isfinite(environment.data.contact.frame).all()
+    assert foot_contact_mask(environment.data, bundle).dtype == torch.bool
+    assert foot_contact_mask(environment.data, bundle).shape == (2,)

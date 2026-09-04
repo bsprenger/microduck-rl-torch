@@ -12,31 +12,44 @@ CONTACTS ?= disabled
 
 CONTACT_ARGS = $(if $(filter enabled,$(CONTACTS)),,--disable-contacts)
 
-.PHONY: help install reinstall-mujoco-torch lock lock-check format lint typecheck deptry check test coverage \
+.PHONY: help install install-upstream install-benchmark reinstall-mujoco-torch lock lock-check format lint typecheck deptry check test coverage \
 	fetch-golden-policy validate-policy validate-env verify-quick \
+	warp-parity validate-warp-parity \
+	benchmark-physics \
 	render-golden render-golden-torch render-golden-native render-golden-ray convert-gif render-golden-gif render-golden-10s \
-	build clean
+	generate-golden-trajectory build clean
 
 help:
 	@echo "MicroDuck RL Torch"
-	@echo "  make install              Sync the uv environment and dev tools"
+	@echo "  make install              Sync the uv environment, dev, and training groups"
+	@echo "  make install-upstream     Add the locked upstream Warp/mjlab reference stack"
+	@echo "  make install-benchmark    Add plotting dependencies for physics benchmarks"
 	@echo "  make reinstall-mujoco-torch Rebuild the sibling local simulator wheel"
 	@echo "  make check                Run formatting, lint, type, and dependency checks"
 	@echo "  make test                 Run the test suite"
 	@echo "  make fetch-golden-policy Download and verify the official HF ONNX policy"
 	@echo "  make validate-env         Run native-vs-mujoco-torch env validation"
+	@echo "  make warp-parity          Compare 500 Torch steps against upstream MuJoCo-Warp"
+	@echo "  make benchmark-physics    Benchmark single-environment physics throughput"
 	@echo "  make verify-quick         Fetch the policy and validate the environment"
 	@echo "  make render-golden        Render the HF policy in the Torch env to MP4"
 	@echo "  make render-golden-gif    Render the HF policy to MP4 and GIF"
 	@echo "  make render-golden-torch  Render the Torch env with full CAD to MP4 and GIF"
 	@echo "  make render-golden-ray    Use the pure mujoco-torch ray renderer"
 	@echo "  make render-golden-10s    Render a 10-second golden-policy MP4 and GIF"
+	@echo "  make generate-golden-trajectory Regenerate the native BAM parity fixture"
 
 install:
-	uv sync --all-groups
+	uv sync --group dev --group training
+
+install-upstream:
+	uv sync --group upstream
+
+install-benchmark:
+	uv sync --group benchmark
 
 reinstall-mujoco-torch:
-	uv sync --reinstall-package mujoco-torch --all-groups
+	uv sync --reinstall-package mujoco-torch --group dev --group training
 
 lock:
 	uv lock
@@ -51,7 +64,9 @@ typecheck:
 	uv run ty check src tests scripts
 
 deptry:
-	uv run deptry . -kf microduck_rl_torch -kf microduck_rl_torch_verification
+	uv run deptry . -kf microduck_rl_torch -kf microduck_rl_torch_verification \
+		--non-dev-dependency-groups benchmark,upstream \
+		--per-rule-ignores 'DEP002=mjlab|better-actuator-models|rustypot|scipy'
 
 lock-check:
 	uv lock --locked
@@ -74,6 +89,52 @@ validate-env: fetch-golden-policy
 	$(PYTHON) scripts/validate_environment.py --policy-dir $(POLICY_DIR) --policy $(POLICY) --steps $(STEPS) --fixed-iterations --solver-iterations $(SOLVER_ITERATIONS) --line-search-iterations $(LINE_SEARCH_ITERATIONS) $(CONTACT_ARGS)
 
 verify-quick: validate-policy validate-env
+
+generate-golden-trajectory:
+	@$(PYTHON) scripts/generate_golden_trajectory.py
+
+WARP_PARITY_STEPS ?= 500
+WARP_PARITY_OUTPUT ?= artifacts/parity/microduck-warp-500.md
+UPSTREAM_ROOT ?=
+UPSTREAM_PYTHON ?= .venv/bin/python
+UPSTREAM_DEVICE ?= cpu
+WARP_PARITY_FAIL_ON ?= state
+
+.PHONY: warp-parity validate-warp-parity
+warp-parity: fetch-golden-policy ## Compare the local Torch rollout with upstream Warp
+	@test -n "$(UPSTREAM_ROOT)" || (echo "Set UPSTREAM_ROOT to the upstream microduck_rl checkout"; exit 2)
+	@test -x "$(UPSTREAM_PYTHON)" || (echo "Missing $(UPSTREAM_PYTHON); run make install-upstream first"; exit 2)
+	@$(PYTHON) scripts/validate_warp_parity.py \
+		--policy "$(POLICY)" --policy-dir "$(POLICY_DIR)" \
+		--upstream-root "$(UPSTREAM_ROOT)" --upstream-python "$(UPSTREAM_PYTHON)" \
+		--upstream-device "$(UPSTREAM_DEVICE)" --steps "$(WARP_PARITY_STEPS)" \
+		--output "$(WARP_PARITY_OUTPUT)" --fail-on "$(WARP_PARITY_FAIL_ON)"
+
+validate-warp-parity: warp-parity
+
+BENCHMARK_STEPS ?= 50
+BENCHMARK_WARMUP_STEPS ?= 10
+BENCHMARK_REPEATS ?= 3
+BENCHMARK_DEVICES ?= cpu,mps
+BENCHMARK_BACKEND ?= both
+BENCHMARK_OUTPUT ?= artifacts/benchmarks/physics-single-env
+BENCHMARK_README_GRAPH ?= docs/assets/microduck-physics-throughput.png
+BENCHMARK_UPSTREAM_ROOT ?= ../microduck_rl
+BENCHMARK_SOLVER_ITERATIONS ?= 4
+BENCHMARK_LINE_SEARCH_ITERATIONS ?= 4
+BENCHMARK_MESH_MESH_CONTACTS ?= disabled
+
+.PHONY: benchmark-physics
+benchmark-physics: ## Benchmark direct physics stepping without policy inference
+	@uv run --group benchmark python scripts/benchmark_physics.py \
+		--backend "$(BENCHMARK_BACKEND)" --devices "$(BENCHMARK_DEVICES)" \
+		--steps "$(BENCHMARK_STEPS)" --warmup-steps "$(BENCHMARK_WARMUP_STEPS)" \
+		--repeats "$(BENCHMARK_REPEATS)" \
+		--solver-iterations "$(BENCHMARK_SOLVER_ITERATIONS)" \
+		--line-search-iterations "$(BENCHMARK_LINE_SEARCH_ITERATIONS)" \
+		--mesh-mesh-contacts "$(BENCHMARK_MESH_MESH_CONTACTS)" \
+		--upstream-root "$(BENCHMARK_UPSTREAM_ROOT)" --output "$(BENCHMARK_OUTPUT)" \
+		--readme-graph "$(BENCHMARK_README_GRAPH)"
 
 RENDER_OUTPUT ?= artifacts/render/microduck-alpha-walking.mp4
 RENDER_GIF ?= artifacts/render/microduck-alpha-walking.gif
