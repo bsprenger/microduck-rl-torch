@@ -25,6 +25,8 @@ def contact_valid(data: Any) -> torch.Tensor:
 def foot_contact_mask(data: Any, bundle: MicroDuckModelBundle) -> torch.Tensor:
     """Return left/right foot contact flags for robot-ground contacts."""
 
+    if not bundle.foot_geom_groups:
+        return torch.zeros(0, dtype=torch.bool, device=data.contact.geom1.device)
     valid = contact_valid(data)
     geom1 = data.contact.geom1
     geom2 = data.contact.geom2
@@ -45,7 +47,7 @@ def self_collision(data: Any, bundle: MicroDuckModelBundle) -> torch.Tensor:
     valid = contact_valid(data)
     geom1 = data.contact.geom1
     geom2 = data.contact.geom2
-    robot_geoms = torch.as_tensor(bundle.collision_geom_ids, device=geom1.device)
+    robot_geoms = torch.as_tensor(bundle.collision_geom_ids, dtype=geom1.dtype, device=geom1.device)
     robot_pair = torch.isin(geom1, robot_geoms) & torch.isin(geom2, robot_geoms)
     return (valid & robot_pair).any()
 
@@ -163,47 +165,62 @@ def compute_velocity_reward_terms(
     return terms
 
 
-def compute_reward(
-    bundle: MicroDuckModelBundle,
-    data: Any,
-    *,
-    command: torch.Tensor,
-    action: torch.Tensor,
-    previous_action: torch.Tensor,
-    previous_foot_positions: torch.Tensor,
-    foot_air_time: torch.Tensor,
-    foot_contact: torch.Tensor,
-    config: RewardConfig,
-    foot_touchdown: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Compatibility wrapper returning the historical weighted reward."""
+_VELOCITY_TERM_NAMES = (
+    "pose",
+    "upright",
+    "track_linear_velocity",
+    "track_angular_velocity",
+    "air_time",
+    "head_pose_tracking",
+    "foot_slip",
+    "body_ang_vel",
+    "angular_momentum",
+    "action_rate_l2",
+    "foot_clearance",
+    "foot_swing_height",
+    "self_collisions",
+)
 
-    terms = compute_velocity_reward_terms(
-        bundle,
-        data,
-        command=command,
-        action=action,
-        previous_action=previous_action,
-        previous_foot_positions=previous_foot_positions,
-        foot_air_time=foot_air_time,
-        foot_contact=foot_contact,
-        config=config,
-        foot_touchdown=foot_touchdown,
-    )
-    weights = {
-        "pose": config.pose,
-        "upright": config.upright,
-        "track_linear_velocity": config.track_linear_velocity,
-        "track_angular_velocity": config.track_angular_velocity,
-        "air_time": config.air_time,
-        "head_pose_tracking": config.head_pose_tracking,
-        "foot_slip": config.foot_slip,
-        "body_ang_vel": config.body_ang_vel,
-        "angular_momentum": config.angular_momentum,
-        "action_rate_l2": config.action_rate_l2,
-        "foot_clearance": config.foot_clearance,
-        "foot_swing_height": config.foot_swing_height,
-        "self_collisions": config.self_collisions,
-    }
-    weighted = torch.stack([terms[name] * weight for name, weight in weights.items()]).sum()
-    return weighted.to(dtype=torch.float32), terms
+
+def velocity_term(name: str):  # type: ignore[no-untyped-def]
+    """Return one configured reward-term function for the velocity task.
+
+    The feature calculation is shared and cached for one transition, but the
+    manager still invokes and weights each named term independently. This
+    preserves the current parity math while allowing another task to add,
+    remove, or replace terms without supplying a monolithic evaluator.
+    """
+
+    if name not in _VELOCITY_TERM_NAMES:
+        raise KeyError(f"Unknown velocity reward term {name!r}")
+
+    def evaluate(env: Any) -> torch.Tensor:
+        cached = getattr(env, "_velocity_reward_cache", None)
+        if cached is None:
+            transition = env.transition
+            if transition is None or env.data is None:
+                raise RuntimeError("Velocity reward terms require an active transition")
+            if (
+                transition.previous_foot_positions is None
+                or transition.foot_air_time is None
+                or transition.foot_contact is None
+                or transition.foot_touchdown is None
+            ):
+                raise RuntimeError("Velocity reward terms require configured foot sensors")
+            cached = compute_velocity_reward_terms(
+                env.bundle,
+                env.data,
+                command=env.command,
+                action=transition.action,
+                previous_action=transition.previous_action,
+                previous_foot_positions=transition.previous_foot_positions,
+                foot_air_time=transition.foot_air_time,
+                foot_contact=transition.foot_contact,
+                config=env.config.rewards,
+                foot_touchdown=transition.foot_touchdown,
+            )
+            env._velocity_reward_cache = cached
+        return cached[name]
+
+    evaluate.__name__ = f"velocity_{name}"
+    return evaluate

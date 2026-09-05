@@ -24,10 +24,11 @@ class ActionManager:
             )
         if not torch.isfinite(action).all():
             raise ValueError("Action contains non-finite values")
-        env.state.previous_joint_velocity = env._encoder_velocity().clone()
-        env.state.previous_action = env.state.last_action.clone()
-        env.state.delay_buffer[env.step_count % len(env.state.delay_buffer)] = action.clone()
-        delayed_index = (env.step_count - env.state.delay_lag) % len(env.state.delay_buffer)
-        applied_action = env.state.delay_buffer[delayed_index]
+        sensor = env.state.sensors
+        sensor.previous_joint_velocity = env._encoder_velocity().clone()
+        sensor.previous_action = sensor.last_action.clone()
+        sensor.delay_buffer[env.step_count % len(sensor.delay_buffer)] = action.clone()
+        delayed_index = (env.step_count - sensor.delay_lag) % len(sensor.delay_buffer)
+        applied_action = sensor.delay_buffer[delayed_index]
         target = env.bundle.default_pose + self.config.scale * applied_action
         return applied_action, target

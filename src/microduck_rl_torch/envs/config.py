@@ -2,14 +2,40 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import Callable, MutableMapping
+from copy import deepcopy
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
 
-@dataclass(frozen=True)
-class CommandConfig:
-    """Command ranges and resampling periods from the upstream task."""
+@dataclass
+class CommandTermCfg:
+    """One named command source with an optional resampling schedule."""
+
+    func: Callable[..., torch.Tensor] | None = None
+    class_type: type[Any] | None = None
+    size: int = 0
+    resample_interval_s: tuple[float, float] | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+    sample_on_reset: bool = True
+
+    def clone(self) -> CommandTermCfg:
+        return deepcopy(self)
+
+
+@dataclass
+class CommandConfig(MutableMapping[str, CommandTermCfg]):
+    """Command term collection plus velocity-task sampling defaults.
+
+    The ranges remain here because the first task's command functions use
+    them. New tasks can ignore those fields and provide their own command
+    terms, just as upstream command term configs replace the velocity command
+    class for posture and prop tasks.
+    """
 
     twist_ranges: tuple[tuple[float, float], ...] = ((-0.4, 0.4), (-0.3, 0.3), (-1.0, 1.0))
     head_ranges: tuple[tuple[float, float], ...] = (
@@ -31,6 +57,41 @@ class CommandConfig:
     body_resample_seconds: tuple[float, float] = (2.0, 5.0)
     turn_in_place_fraction: float = 0.15
     standing_fraction: float = 0.02
+    terms: OrderedDict[str, CommandTermCfg] = field(default_factory=OrderedDict)
+
+    def __getitem__(self, name: str) -> CommandTermCfg:
+        return self.terms[name]
+
+    def __setitem__(self, name: str, term: CommandTermCfg) -> None:
+        if not isinstance(term, CommandTermCfg):
+            raise TypeError(f"Expected CommandTermCfg for {name!r}")
+        self.terms[name] = term
+
+    def __delitem__(self, name: str) -> None:
+        del self.terms[name]
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter(self.terms)
+
+    def __len__(self) -> int:
+        return len(self.terms)
+
+    def add(self, name: str, term: CommandTermCfg) -> None:
+        if name in self.terms:
+            raise KeyError(f"Command term {name!r} already exists; use replace()")
+        self[name] = term
+
+    def replace(self, name: str, term: CommandTermCfg) -> None:
+        if name not in self.terms:
+            raise KeyError(f"Cannot replace missing command term {name!r}")
+        self[name] = term
+
+    def remove(self, name: str) -> None:
+        del self[name]
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(self.terms)
 
 
 @dataclass(frozen=True)
@@ -80,7 +141,7 @@ class RewardConfig:
 
 @dataclass(frozen=True)
 class MicroDuckVelocityConfig:
-    """Runtime subset of ``make_microduck_velocity_env_cfg``."""
+    """Task-specific settings used by the velocity manager terms."""
 
     episode_length_steps: int = 1000
     command: CommandConfig = field(default_factory=CommandConfig)
@@ -123,46 +184,45 @@ def sample_uniform(
     return values
 
 
-def sample_command(
-    config: CommandConfig,
-    *,
-    generator: torch.Generator | None,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Sample the 13D command, including the upstream standing/turn buckets."""
-
-    return torch.cat(
-        (
-            sample_twist(config, generator=generator, device=device, dtype=dtype),
-            sample_uniform(config.head_ranges, generator=generator, device=device, dtype=dtype),
-            sample_uniform(config.body_ranges, generator=generator, device=device, dtype=dtype),
-        )
-    )
-
-
 def sample_twist(
-    config: CommandConfig,
+    config: CommandConfig | None,
     *,
     generator: torch.Generator | None,
     device: torch.device,
     dtype: torch.dtype,
+    twist_ranges: tuple[tuple[float, float], ...] | None = None,
+    turn_in_place_fraction: float | None = None,
+    standing_fraction: float | None = None,
 ) -> torch.Tensor:
     """Sample only the 3D velocity command used by twist resampling."""
 
-    twist = sample_uniform(config.twist_ranges, generator=generator, device=device, dtype=dtype)
+    if config is None and twist_ranges is None:
+        raise ValueError("sample_twist needs a config or explicit twist_ranges")
+    if twist_ranges is None:
+        assert config is not None
+        ranges = config.twist_ranges
+    else:
+        ranges = twist_ranges
+    turn_fraction = (
+        config.turn_in_place_fraction
+        if turn_in_place_fraction is None and config is not None
+        else (turn_in_place_fraction or 0.0)
+    )
+    standing_fraction_value = (
+        config.standing_fraction
+        if standing_fraction is None and config is not None
+        else (standing_fraction or 0.0)
+    )
+    twist = sample_uniform(ranges, generator=generator, device=device, dtype=dtype)
     standing = (
-        torch.rand((), generator=generator, device=device, dtype=dtype) < config.standing_fraction
+        torch.rand((), generator=generator, device=device, dtype=dtype) < standing_fraction_value
     )
     if standing:
         twist[:] = 0.0
-    turn_in_place = (
-        torch.rand((), generator=generator, device=device, dtype=dtype)
-        < config.turn_in_place_fraction
-    )
+    turn_in_place = torch.rand((), generator=generator, device=device, dtype=dtype) < turn_fraction
     if turn_in_place:
         twist[:2] = 0.0
-        lo, hi = config.twist_ranges[2]
+        lo, hi = ranges[2]
         max_rate = max(abs(lo), abs(hi))
         magnitude = (
             torch.rand((), generator=generator, device=device, dtype=dtype) * (max_rate * 0.6)

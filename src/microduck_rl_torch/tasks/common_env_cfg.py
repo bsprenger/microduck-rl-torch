@@ -5,14 +5,31 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 
-from microduck_rl_torch.envs.config import CommandConfig, MicroDuckVelocityConfig
-from microduck_rl_torch.envs.core import VelocityTaskRuntime
-from microduck_rl_torch.envs.managers import bad_orientation, timeout
+from microduck_rl_torch.envs.config import CommandConfig, CommandTermCfg, MicroDuckVelocityConfig
+from microduck_rl_torch.envs.managers import (
+    bad_orientation,
+    body_pose_command,
+    head_pose_command,
+    timeout,
+    velocity_command,
+)
+from microduck_rl_torch.envs.observations import (
+    base_ang_vel,
+    base_lin_vel,
+    command,
+    joint_position,
+    joint_velocity,
+    last_action,
+    projected_gravity,
+)
+from microduck_rl_torch.envs.rewards import velocity_term
 from microduck_rl_torch.envs.scene import SceneCfg, SensorCfg, TerrainCfg
 from microduck_rl_torch.envs.task_config import (
     ActionCfg,
+    EventTermCfg,
     ObservationGroupCfg,
     ObservationGroupsCfg,
+    ObservationTermCfg,
     TaskEnvCfg,
     TermCfg,
     TermCollection,
@@ -30,31 +47,52 @@ class MicroduckRlCfg:
     critic_observation_group: str = "critic"
 
 
-def _actor_observation(ctx):  # type: ignore[no-untyped-def]
-    return ctx.env._build_actor_observation()
+def _observation_noise(env, value, scale: float):  # type: ignore[no-untyped-def]
+    return env._observation_noise(value.shape, scale)
 
 
-def _push_event(ctx):  # type: ignore[no-untyped-def]
-    ctx.env._apply_push()
+def _push_event(env):  # type: ignore[no-untyped-def]
+    env._apply_push()
 
 
 def _velocity_rewards() -> TermCollection:
     return TermCollection(
         OrderedDict(
             (
-                ("pose", TermCfg(weight=1.0)),
-                ("upright", TermCfg(weight=2.0)),
-                ("track_linear_velocity", TermCfg(weight=2.0)),
-                ("track_angular_velocity", TermCfg(weight=2.0)),
-                ("air_time", TermCfg(weight=3.0)),
-                ("head_pose_tracking", TermCfg(weight=2.0)),
-                ("foot_slip", TermCfg(weight=-0.1)),
-                ("body_ang_vel", TermCfg(weight=-0.05)),
-                ("angular_momentum", TermCfg(weight=-0.02)),
-                ("action_rate_l2", TermCfg(weight=-0.1)),
-                ("foot_clearance", TermCfg(weight=-2.0)),
-                ("foot_swing_height", TermCfg(weight=-0.25)),
-                ("self_collisions", TermCfg(weight=-1.0)),
+                ("pose", TermCfg(func=velocity_term("pose"), weight=1.0)),
+                ("upright", TermCfg(func=velocity_term("upright"), weight=2.0)),
+                (
+                    "track_linear_velocity",
+                    TermCfg(func=velocity_term("track_linear_velocity"), weight=2.0),
+                ),
+                (
+                    "track_angular_velocity",
+                    TermCfg(func=velocity_term("track_angular_velocity"), weight=2.0),
+                ),
+                ("air_time", TermCfg(func=velocity_term("air_time"), weight=3.0)),
+                (
+                    "head_pose_tracking",
+                    TermCfg(func=velocity_term("head_pose_tracking"), weight=2.0),
+                ),
+                ("foot_slip", TermCfg(func=velocity_term("foot_slip"), weight=-0.1)),
+                ("body_ang_vel", TermCfg(func=velocity_term("body_ang_vel"), weight=-0.05)),
+                (
+                    "angular_momentum",
+                    TermCfg(func=velocity_term("angular_momentum"), weight=-0.02),
+                ),
+                ("action_rate_l2", TermCfg(func=velocity_term("action_rate_l2"), weight=-0.1)),
+                (
+                    "foot_clearance",
+                    TermCfg(func=velocity_term("foot_clearance"), weight=-2.0),
+                ),
+                (
+                    "foot_swing_height",
+                    TermCfg(func=velocity_term("foot_swing_height"), weight=-0.25),
+                ),
+                (
+                    "self_collisions",
+                    TermCfg(func=velocity_term("self_collisions"), weight=-1.0),
+                ),
             )
         )
     )
@@ -66,7 +104,7 @@ def _velocity_terminations() -> TermCollection:
             (
                 ("non_finite", TermCfg()),
                 ("bad_orientation", TermCfg(func=bad_orientation)),
-                ("timeout", TermCfg(func=timeout)),
+                ("timeout", TermCfg(func=timeout, time_out=True)),
             )
         )
     )
@@ -75,8 +113,62 @@ def _velocity_terminations() -> TermCollection:
 def make_velocity_env_cfg(*, play: bool = False) -> TaskEnvCfg:
     """Create a fresh generic velocity configuration to mutate per robot."""
 
-    runtime = MicroDuckVelocityConfig()
+    task_config = MicroDuckVelocityConfig()
     robot = MICRODUCK_WALK_ROBOT_CFG
+    actor_terms = TermCollection(
+        OrderedDict(
+            (
+                (
+                    "base_ang_vel",
+                    ObservationTermCfg(
+                        func=base_ang_vel,
+                        noise=_observation_noise,
+                        noise_params={"scale": task_config.actor_noise[0]},
+                        params={"misaligned": True},
+                    ),
+                ),
+                (
+                    "projected_gravity",
+                    ObservationTermCfg(
+                        func=projected_gravity,
+                        noise=_observation_noise,
+                        noise_params={"scale": task_config.actor_noise[1]},
+                        params={"misaligned": True},
+                    ),
+                ),
+                (
+                    "joint_position",
+                    ObservationTermCfg(
+                        func=joint_position,
+                        noise=_observation_noise,
+                        noise_params={"scale": task_config.actor_noise[2]},
+                        params={"biased": True},
+                    ),
+                ),
+                (
+                    "joint_velocity",
+                    ObservationTermCfg(
+                        func=joint_velocity,
+                        noise=_observation_noise,
+                        noise_params={"scale": task_config.actor_noise[3]},
+                        params={"delayed": True},
+                    ),
+                ),
+                ("last_action", ObservationTermCfg(func=last_action)),
+                ("command", ObservationTermCfg(func=command)),
+            )
+        )
+    )
+    critic_terms = actor_terms.clone()
+    for term in critic_terms.values():
+        if isinstance(term, ObservationTermCfg):
+            term.noise = None
+            term.noise_params = {}
+    critic_terms["base_ang_vel"].params["misaligned"] = False
+    critic_terms["projected_gravity"].params["misaligned"] = False
+    critic_terms["joint_position"].params["biased"] = False
+    critic_terms["joint_velocity"].params["delayed"] = False
+    critic_terms.add("base_lin_vel", ObservationTermCfg(func=base_lin_vel))
     return TaskEnvCfg(
         task_name="Velocity",
         scene=SceneCfg(
@@ -89,21 +181,54 @@ def make_velocity_env_cfg(*, play: bool = False) -> TaskEnvCfg:
             scene_xml=robot.load_path,
         ),
         actions=ActionCfg(size=14, scale=1.0, delay_lag=0, actuator_mode="bam"),
-        commands=CommandConfig(),
+        commands=CommandConfig(
+            terms=OrderedDict(
+                (
+                    (
+                        "twist",
+                        CommandTermCfg(
+                            func=velocity_command,
+                            size=3,
+                            resample_interval_s=task_config.command.twist_resample_seconds,
+                            params={
+                                "twist_ranges": task_config.command.twist_ranges,
+                                "turn_in_place_fraction": (
+                                    task_config.command.turn_in_place_fraction
+                                ),
+                                "standing_fraction": task_config.command.standing_fraction,
+                            },
+                        ),
+                    ),
+                    (
+                        "head_pose",
+                        CommandTermCfg(
+                            func=head_pose_command,
+                            size=4,
+                            resample_interval_s=task_config.command.head_resample_seconds,
+                            params={"ranges": task_config.command.head_ranges},
+                        ),
+                    ),
+                    (
+                        "body_pose",
+                        CommandTermCfg(
+                            func=body_pose_command,
+                            size=6,
+                            resample_interval_s=task_config.command.body_resample_seconds,
+                            params={"ranges": task_config.command.body_ranges},
+                        ),
+                    ),
+                )
+            )
+        ),
         observations=ObservationGroupsCfg(
             groups={
-                "actor": ObservationGroupCfg(builder=_actor_observation, expected_size=61),
-                # The upstream policy is actor-facing today, but retaining a
-                # named critic group prevents asymmetric observations from
-                # becoming an architectural afterthought in future tasks.
-                # The first Torch milestone has no trainer/critic contract;
-                # keep the group named and disabled until its privileged
-                # upstream terms are implemented rather than pretending it is
-                # identical to the actor.
+                "actor": ObservationGroupCfg(
+                    terms=actor_terms,
+                    expected_size=61,
+                ),
                 "critic": ObservationGroupCfg(
-                    builder=None,
-                    expected_size=None,
-                    enabled=False,
+                    terms=critic_terms,
+                    expected_size=64,
                 ),
             }
         ),
@@ -114,14 +239,18 @@ def make_velocity_env_cfg(*, play: bool = False) -> TaskEnvCfg:
                 (
                     (
                         "velocity_push",
-                        TermCfg(func=_push_event, params={"stage": "pre_physics"}),
+                        EventTermCfg(
+                            func=_push_event,
+                            mode="interval",
+                            interval_range_s=task_config.randomization.velocity_push_interval,
+                            requires_domain_randomization=True,
+                        ),
                     ),
                 )
             )
         ),
         curriculum=TermCollection(),
-        runtime=runtime,
-        runtime_factory=VelocityTaskRuntime,
+        task=task_config,
         play=play,
         metadata={
             "family": "velocity",

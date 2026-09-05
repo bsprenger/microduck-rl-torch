@@ -59,7 +59,6 @@ def _local_trace(
             device=bundle.device,
             dtype=bundle.dtype,
         ),
-        action_delay_lag=0,
         domain_randomization=False,
     )
     policy = OnnxPolicy(policy_path, manifest_path)

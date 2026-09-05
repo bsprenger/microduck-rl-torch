@@ -106,7 +106,7 @@ MICRODUCK_WALK_BACKLASH_ROBOT_CFG = _entity(
 MICRODUCK_ROLLERS_BACKLASH_ROBOT_CFG = _entity(
     "robot",
     "robot_groundcontact_rollers_backlash.xml",
-    "robot_groundcontact_rollers_backlash.xml",
+    "scene_rollers_backlash.xml",
     foot_selectors=_ROLLER_FOOT_SELECTORS,
 )
 
@@ -116,5 +116,8 @@ MICRODUCK_BALL_CFG = EntityCfg(
     scene_xml_path=_asset_root() / "scene_ball.xml",
     kind="prop",
     keyframe_name=None,
+    root_body_name="ball",
+    foot_site_selector=None,
+    foot_contact_selectors=None,
     actuator_joint_names=(),
 )

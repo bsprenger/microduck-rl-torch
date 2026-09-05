@@ -1,4 +1,4 @@
-"""The 61-element `new_cmd_obs` actor observation contract."""
+"""Reusable observation terms and the current policy command helper."""
 
 from __future__ import annotations
 
@@ -6,7 +6,74 @@ from typing import Any
 
 import torch
 
-from .model import MicroDuckModelBundle
+
+def _sensor_state(env: Any) -> Any:
+    if env.state is None:
+        raise RuntimeError("Call reset() before reading observations")
+    return env.state.sensors
+
+
+def _quat_apply(quaternion: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+    """Rotate vectors by quaternions in ``[w, x, y, z]`` order."""
+
+    xyz = quaternion[..., 1:]
+    t = 2.0 * torch.cross(xyz, vector, dim=-1)
+    return vector + quaternion[..., :1] * t + torch.cross(xyz, t, dim=-1)
+
+
+def base_ang_vel(env: Any, *, misaligned: bool = True) -> torch.Tensor:
+    """Return the delayed IMU angular-velocity observation term."""
+
+    sensor = _sensor_state(env)
+    index = max(0, len(sensor.imu_ang_vel_history) - 1 - sensor.imu_lag)
+    value = sensor.imu_ang_vel_history[index]
+    return _quat_apply(sensor.imu_quaternion, value) if misaligned else value
+
+
+def projected_gravity(env: Any, *, misaligned: bool = True) -> torch.Tensor:
+    """Return the delayed projected-gravity observation term."""
+
+    sensor = _sensor_state(env)
+    index = max(0, len(sensor.projected_gravity_history) - 1 - sensor.imu_lag)
+    value = sensor.projected_gravity_history[index]
+    return _quat_apply(sensor.imu_quaternion, value) if misaligned else value
+
+
+def joint_position(env: Any, *, biased: bool = True) -> torch.Tensor:
+    """Return output-side joint position relative to the model home pose."""
+
+    sensor = _sensor_state(env)
+    position = env._joint_measurements()[0]
+    if biased:
+        position = position + sensor.encoder_bias
+    return position - env.bundle.default_pose
+
+
+def joint_velocity(env: Any, *, delayed: bool = True) -> torch.Tensor:
+    """Return the delayed output-side joint velocity term."""
+
+    sensor = _sensor_state(env)
+    return sensor.previous_joint_velocity if delayed else env._encoder_velocity()
+
+
+def base_lin_vel(env: Any) -> torch.Tensor:
+    """Return privileged trunk linear velocity in the trunk frame."""
+
+    if env.data is None:
+        raise RuntimeError("Call reset() before reading observations")
+    return env.data.cvel[env.bundle.trunk_body_id, 3:6]
+
+
+def last_action(env: Any) -> torch.Tensor:
+    """Return the previous policy action term."""
+
+    return _sensor_state(env).last_action
+
+
+def command(env: Any) -> torch.Tensor:
+    """Return the concatenated command-manager output."""
+
+    return env.command
 
 
 def command_vector(
@@ -46,87 +113,3 @@ def command_vector(
         dtype=dtype,
         device=device,
     )
-
-
-def _quat_rotate_inverse(quaternion: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
-    xyz = quaternion[..., 1:]
-    t = 2.0 * torch.cross(xyz, vector, dim=-1)
-    return vector - quaternion[..., :1] * t + torch.cross(xyz, t, dim=-1)
-
-
-def _quat_apply(quaternion: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
-    """Rotate vectors by quaternions in ``[w, x, y, z]`` order."""
-
-    xyz = quaternion[..., 1:]
-    t = 2.0 * torch.cross(xyz, vector, dim=-1)
-    return vector + quaternion[..., :1] * t + torch.cross(xyz, t, dim=-1)
-
-
-def _expand_last(value: torch.Tensor, batch_shape: torch.Size) -> torch.Tensor:
-    if value.ndim == 1:
-        return value.expand(*batch_shape, value.shape[-1])
-    if value.shape[:-1] != batch_shape:
-        raise ValueError(
-            f"Expected batch shape {tuple(batch_shape)}, got {tuple(value.shape[:-1])}"
-        )
-    return value
-
-
-def build_actor_observation(
-    bundle: MicroDuckModelBundle,
-    data: Any,
-    last_action: torch.Tensor,
-    command: torch.Tensor,
-    *,
-    joint_position: torch.Tensor | None = None,
-    joint_position_bias: torch.Tensor | None = None,
-    joint_velocity: torch.Tensor | None = None,
-    base_ang_vel: torch.Tensor | None = None,
-    projected_gravity: torch.Tensor | None = None,
-    imu_quaternion: torch.Tensor | None = None,
-    noise: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Build the upstream 61D actor observation.
-
-    The optional values are the runtime sensor path: delayed joint velocity,
-    encoder bias, IMU misalignment, and observation noise.  Leaving them unset
-    preserves the deterministic nominal observation used by structural tests.
-    """
-
-    qpos_indices = bundle.qpos_indices.to(data.qpos.device)
-    qvel_indices = bundle.qvel_indices.to(data.qvel.device)
-    if base_ang_vel is None:
-        base_ang_vel = data.sensordata[..., bundle.sensor_slices["imu_ang_vel"]]
-    quaternion = data.xquat[..., bundle.trunk_body_id, :]
-    gravity_world = torch.zeros(
-        (*quaternion.shape[:-1], 3), dtype=data.qpos.dtype, device=data.qpos.device
-    )
-    gravity_world[..., 2] = -1.0
-    if projected_gravity is None:
-        projected_gravity = _quat_rotate_inverse(quaternion, gravity_world)
-    if joint_position_bias is None:
-        joint_position_bias = torch.zeros_like(bundle.default_pose)
-    if joint_position is None:
-        joint_position = data.qpos.index_select(-1, qpos_indices)
-    joint_position = joint_position + joint_position_bias - bundle.default_pose
-    if joint_velocity is None:
-        joint_velocity = data.qvel.index_select(-1, qvel_indices)
-    if imu_quaternion is not None:
-        base_ang_vel = _quat_apply(imu_quaternion, base_ang_vel)
-        projected_gravity = _quat_apply(imu_quaternion, projected_gravity)
-    batch_shape = data.qpos.shape[:-1]
-    action = _expand_last(torch.as_tensor(last_action, device=data.qpos.device), batch_shape)
-    command = _expand_last(torch.as_tensor(command, device=data.qpos.device), batch_shape)
-    observation = torch.cat(
-        [base_ang_vel, projected_gravity, joint_position, joint_velocity, action, command], dim=-1
-    )
-    if observation.shape[-1] != bundle.observation_size:
-        raise RuntimeError(f"Built observation of size {observation.shape[-1]}, expected 61")
-    if noise is not None:
-        if noise.shape != observation.shape:
-            raise ValueError(
-                "Expected observation noise shape "
-                f"{tuple(observation.shape)}, got {tuple(noise.shape)}"
-            )
-        observation = observation + noise
-    return observation.to(dtype=torch.float32)

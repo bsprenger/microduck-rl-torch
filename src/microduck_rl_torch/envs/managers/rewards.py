@@ -2,48 +2,69 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 
-from ..rewards import compute_velocity_reward_terms
+from ..rewards import velocity_term
 from ..task_config import TermCollection
-
-RewardEvaluator = Callable[[Any, dict[str, Any]], dict[str, torch.Tensor]]
-
-
-def default_velocity_evaluator(env: Any, values: dict[str, Any]) -> dict[str, torch.Tensor]:
-    """Adapt the existing parity-tested velocity evaluator to the manager API."""
-
-    return compute_velocity_reward_terms(
-        env.bundle,
-        env.data,
-        command=env.command,
-        action=values["action"],
-        previous_action=values["previous_action"],
-        previous_foot_positions=values["previous_foot_positions"],
-        foot_air_time=values["foot_air_time"],
-        foot_contact=values["foot_contact"],
-        config=env.config.rewards,
-        foot_touchdown=values["foot_touchdown"],
-    )
+from .base import call_term, reset_term, resolve_term
 
 
 @dataclass
 class RewardManager:
     terms: TermCollection
-    evaluator: RewardEvaluator = default_velocity_evaluator
+    scale_by_dt: bool = False
 
-    def compute(self, env: Any, **values: Any) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        raw = self.evaluator(env, values)
-        missing = [name for name, term in self.terms.items() if term.enabled and name not in raw]
+    def __post_init__(self) -> None:
+        self._resolved_terms: dict[str, Any] = {}
+
+    def reset(self, env: Any, env_ids: torch.Tensor | None = None) -> None:
+        for name, term in self.terms.items():
+            if term.enabled and term.weight != 0.0:
+                function = self._resolved_terms.get(name)
+                if function is None:
+                    function = resolve_term(term, env)
+                    self._resolved_terms[name] = function
+                reset_term(function, env_ids)
+
+    def compute(self, env: Any) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        raw: dict[str, torch.Tensor] = {}
+        for name, term in self.terms.items():
+            if not term.enabled:
+                continue
+            if term.weight == 0.0:
+                continue
+            if name not in self._resolved_terms:
+                self._resolved_terms[name] = resolve_term(term, env)
+            function = self._resolved_terms[name]
+            if function is None:
+                raise RuntimeError(f"Reward term {name!r} has no function")
+            raw[name] = torch.as_tensor(
+                call_term(function, env, term.params),
+                dtype=env.bundle.dtype,
+                device=env.bundle.device,
+            )
+        missing = [
+            name
+            for name, term in self.terms.items()
+            if term.enabled and term.weight != 0.0 and name not in raw
+        ]
         if missing:
             raise RuntimeError(f"Configured reward terms are not produced: {missing!r}")
-        weighted = [raw[name] * term.weight for name, term in self.terms.items() if term.enabled]
+        weighted = [
+            raw[name] * term.weight
+            for name, term in self.terms.items()
+            if term.enabled and term.weight != 0.0
+        ]
         if not weighted:
             reward = torch.zeros((), dtype=env.bundle.dtype, device=env.bundle.device)
         else:
             reward = torch.stack([value.reshape(()) for value in weighted]).sum()
+        if self.scale_by_dt:
+            reward = reward * (env.bundle.timestep * env.decimation)
         return reward.to(dtype=torch.float32), raw
+
+
+__all__ = ["RewardManager", "velocity_term"]

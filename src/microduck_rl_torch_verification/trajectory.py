@@ -198,14 +198,17 @@ def rollout_torch(
     )
     observations = [environment.reset().detach().cpu().numpy()]
     if environment.state is None:
-        raise RuntimeError("Environment runtime state disappeared during reset")
+        raise RuntimeError("Environment state disappeared during reset")
     qpos = [environment.snapshot()["qpos"].detach().cpu().numpy()]
     qvel = [environment.snapshot()["qvel"].detach().cpu().numpy()]
     qacc = [environment.snapshot()["qacc"].detach().cpu().numpy()]
     ctrl = [environment.snapshot()["ctrl"].detach().cpu().numpy()]
     sensordata = [environment.snapshot()["sensordata"].detach().cpu().numpy()]
     times = [environment.snapshot()["time"]]
-    foot_contacts = [environment.state.foot_contact.detach().cpu().numpy()]
+    initial_foot_contact = environment.state.sensors.foot_contact
+    if initial_foot_contact is None:
+        raise RuntimeError("Golden trajectory requires foot-contact state")
+    foot_contacts = [initial_foot_contact.detach().cpu().numpy()]
     rewards: list[float] = []
     terminated: list[bool] = []
     truncated: list[bool] = []
@@ -220,8 +223,11 @@ def rollout_torch(
         sensordata.append(snapshot["sensordata"].detach().cpu().numpy())
         times.append(snapshot["time"])
         if environment.state is None:
-            raise RuntimeError("Environment runtime state disappeared during rollout")
-        foot_contacts.append(environment.state.foot_contact.detach().cpu().numpy())
+            raise RuntimeError("Environment state disappeared during rollout")
+        foot_contact = environment.state.sensors.foot_contact
+        if foot_contact is None:
+            raise RuntimeError("Golden trajectory requires foot-contact state")
+        foot_contacts.append(foot_contact.detach().cpu().numpy())
         rewards.append(float(result.reward))
         terminated.append(result.terminated)
         truncated.append(result.truncated)
@@ -264,6 +270,8 @@ def compare_trajectory(
         candidate = actual[field]
         if reference.shape != candidate.shape:
             raise AssertionError(f"{field} shape mismatch: {reference.shape} != {candidate.shape}")
+        if not np.isfinite(reference).all() or not np.isfinite(candidate).all():
+            raise AssertionError(f"{field} contains non-finite values")
         error = float(np.max(np.abs(reference.astype(np.float64) - candidate.astype(np.float64))))
         errors[field] = error
         if error > tolerances[field]:

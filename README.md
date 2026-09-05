@@ -155,7 +155,7 @@ observation = env.reset(seed=0)
 
 Task configurations own scene/entity selection and ordered action, observation, reward, termination,
 event, and curriculum terms. `ManagerBasedTaskEnv` composes a generic `PhysicsBackend` with explicit
-managers and task-owned runtime state. See
+managers and task-owned environment state. See
 [`docs/architecture.md`](docs/architecture.md) for the model variant and mutation conventions.
 
 The intended destination is a single PyTorch workflow that can be prototyped on CPU or Apple MPS,

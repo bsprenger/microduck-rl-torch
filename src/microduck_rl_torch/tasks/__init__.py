@@ -2,7 +2,7 @@
 
 This module intentionally contains no registration side effects.  Call a
 factory, inspect/mutate its returned configuration, and pass it to the Torch
-environment runtime directly.
+manager-based environment directly.
 """
 
 from .microduck_velocity_env_cfg import MicroduckRlCfg, make_microduck_velocity_env_cfg

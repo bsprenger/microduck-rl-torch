@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -109,6 +110,69 @@ def _resolve_selector(model: Any, obj_type: int, selector: SemanticSelector) -> 
 
 
 @dataclass(frozen=True)
+class EntityView:
+    """Resolved semantic view of one compiled scene entity."""
+
+    name: str
+    kind: str
+    root_body_id: int
+    body_ids: tuple[int, ...]
+    geom_ids: tuple[int, ...]
+    joint_ids: tuple[int, ...]
+    qpos_indices: torch.Tensor
+    qvel_indices: torch.Tensor
+
+
+def _joint_qpos_width(joint_type: int) -> int:
+    # MuJoCo joint enum values are stable: free, ball, slide, hinge.
+    return (7, 4, 1, 1)[joint_type]
+
+
+def _joint_qvel_width(joint_type: int) -> int:
+    return (6, 3, 1, 1)[joint_type]
+
+
+def _resolve_entity_view(
+    model: Any,
+    entity_cfg: EntityCfg,
+    *,
+    device: torch.device,
+) -> EntityView:
+    root_name = entity_cfg.root_body_name or entity_cfg.trunk_body_name
+    root_body_id = _required_id(model, mujoco_api.mjtObj.mjOBJ_BODY, root_name)
+    body_ids = tuple(sorted(_body_descendants(model, root_body_id)))
+    body_id_set = set(body_ids)
+    geom_ids = tuple(
+        geom_id
+        for geom_id in range(int(model.ngeom))
+        if int(model.geom_bodyid[geom_id]) in body_id_set
+    )
+    joint_ids = tuple(
+        joint_id
+        for joint_id in range(int(model.njnt))
+        if int(model.jnt_bodyid[joint_id]) in body_id_set
+    )
+    qpos_indices: list[int] = []
+    qvel_indices: list[int] = []
+    for joint_id in joint_ids:
+        joint_type = int(model.jnt_type[joint_id])
+        qpos_start = int(model.jnt_qposadr[joint_id])
+        qvel_start = int(model.jnt_dofadr[joint_id])
+        qpos_indices.extend(range(qpos_start, qpos_start + _joint_qpos_width(joint_type)))
+        qvel_indices.extend(range(qvel_start, qvel_start + _joint_qvel_width(joint_type)))
+    return EntityView(
+        name=entity_cfg.name,
+        kind=entity_cfg.kind,
+        root_body_id=root_body_id,
+        body_ids=body_ids,
+        geom_ids=geom_ids,
+        joint_ids=joint_ids,
+        qpos_indices=torch.tensor(qpos_indices, dtype=torch.long, device=device),
+        qvel_indices=torch.tensor(qvel_indices, dtype=torch.long, device=device),
+    )
+
+
+@dataclass(frozen=True)
 class MicroDuckModelBundle:
     """Native and device-resident representations of one MicroDuck model."""
 
@@ -135,19 +199,28 @@ class MicroDuckModelBundle:
     sensor_slices: dict[str, slice]
     trunk_body_id: int
     head_body_ids: tuple[int, ...]
-    foot_site_ids: tuple[int, int]
-    foot_geom_ids: tuple[int, int]
-    foot_geom_groups: tuple[tuple[int, ...], tuple[int, ...]]
+    foot_site_ids: tuple[int, ...]
+    foot_geom_ids: tuple[int, ...]
+    foot_geom_groups: tuple[tuple[int, ...], ...]
     collision_geom_ids: tuple[int, ...]
     actuator_mode: str
     bam_parameters: BamM6Parameters | None
     friction_dof_count: int
+    entities: Mapping[str, EntityView]
     observation_size: int = 61
     action_size: int = 14
 
     @property
     def has_backlash(self) -> bool:
         return bool(self.backlash_mask.any().item())
+
+    def entity(self, name: str) -> EntityView:
+        """Return a resolved semantic entity view by task-configured name."""
+
+        try:
+            return self.entities[name]
+        except KeyError as exc:
+            raise KeyError(f"Scene entity {name!r} is not present in the model bundle") from exc
 
     def new_data(self) -> Any:
         """Create a forward-computed standing state on the target device."""
@@ -205,6 +278,16 @@ class MicroDuckModelBundle:
             "contacts_enabled": self.contacts_enabled,
             "actuator_joint_names": list(self.actuator_joint_names),
             "entity_name": self.entity_cfg.name,
+            "entities": {
+                name: {
+                    "kind": entity.kind,
+                    "root_body_id": entity.root_body_id,
+                    "body_ids": list(entity.body_ids),
+                    "geom_ids": list(entity.geom_ids),
+                    "joint_ids": list(entity.joint_ids),
+                }
+                for name, entity in self.entities.items()
+            },
             "robot_xml_path": str(self.entity_cfg.xml_path),
             "scene_xml_path": (
                 str(self.entity_cfg.scene_xml_path)
@@ -280,7 +363,7 @@ def _compile_bam_model(
     return spec.compile()
 
 
-def _move_mesh_geometry(model: Any, *, device: torch.device) -> Any:
+def _move_mesh_geometry(model: Any, *, device: torch.device, dtype: torch.dtype) -> Any:
     """Move optional convex-mesh tensors and precomputed metadata to a device.
 
     Dtype conversion belongs in ``mujoco_torch.device_put``. This device-only
@@ -288,8 +371,14 @@ def _move_mesh_geometry(model: Any, *, device: torch.device) -> Any:
     metadata are not reliably moved by ``TensorClass.to`` on every backend.
     """
 
+    def move_tensor(value: torch.Tensor) -> torch.Tensor:
+        value_dtype = getattr(value, "dtype", None)
+        if isinstance(value_dtype, torch.dtype) and value_dtype.is_floating_point:
+            return value.to(device=device, dtype=dtype)
+        return value.to(device=device)
+
     def move_optional(values: tuple[Any, ...]) -> tuple[Any, ...]:
-        return tuple(None if value is None else value.to(device=device) for value in values)
+        return tuple(None if value is None else move_tensor(value) for value in values)
 
     convex_fields = {
         "geom_convex_vert": move_optional(model.geom_convex_vert),
@@ -303,7 +392,7 @@ def _move_mesh_geometry(model: Any, *, device: torch.device) -> Any:
 
     def move_auxiliary(value: Any) -> Any:
         if isinstance(value, torch.Tensor):
-            return value.to(device=device)
+            return move_tensor(value)
         if isinstance(value, dict):
             return {key: move_auxiliary(item) for key, item in value.items()}
         if isinstance(value, tuple):
@@ -324,6 +413,7 @@ def load_microduck_model(
     xml_path: Path | None = None,
     *,
     entity_cfg: EntityCfg | None = None,
+    entities: Mapping[str, EntityCfg] | None = None,
     device: str | torch.device = "cpu",
     dtype: torch.dtype = torch.float32,
     timestep: float = 0.005,
@@ -348,6 +438,9 @@ def load_microduck_model(
         from ..robot.model_variants import MICRODUCK_WALK_ROBOT_CFG
 
         entity_cfg = MICRODUCK_WALK_ROBOT_CFG
+    scene_entities = dict(entities or {entity_cfg.name: entity_cfg})
+    if entity_cfg.name not in scene_entities:
+        scene_entities[entity_cfg.name] = entity_cfg
     path = (xml_path or entity_cfg.load_path or default_scene_path()).resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -423,48 +516,59 @@ def load_microduck_model(
             native_model, mujoco_api.mjtObj.mjOBJ_KEY, entity_cfg.keyframe_name
         )
         if key_id < 0:
-            raise ValueError(
-                f"Required keyframe {entity_cfg.keyframe_name!r} was not found in {path}"
-            )
-        default_qpos = np.asarray(native_model.key_qpos[key_id], dtype=np.float64)
+            if any(cfg.kind != "robot" for cfg in scene_entities.values()):
+                # Upstream prop scenes such as scene_ball intentionally omit
+                # keyframes because a free joint changes the full qpos size.
+                # Task reset terms own the initial placement in that case.
+                default_qpos = np.asarray(native_model.qpos0, dtype=np.float64).copy()
+            else:
+                raise ValueError(
+                    f"Required keyframe {entity_cfg.keyframe_name!r} was not found in {path}"
+                )
+        else:
+            default_qpos = np.asarray(native_model.key_qpos[key_id], dtype=np.float64)
     else:
         # A free-body entity such as the future BallKick prop may have no
         # named keyframe. MuJoCo's qpos0 is the correct neutral fallback.
         default_qpos = np.asarray(native_model.qpos0, dtype=np.float64).copy()
     model = mujoco_torch.device_put(native_model, dtype=dtype).to(device_obj)
-    model = _move_mesh_geometry(model, device=device_obj)
+    model = _move_mesh_geometry(model, device=device_obj, dtype=dtype)
     if disable_mesh_mesh_contacts:
         model._device_precomp["skip_mesh_mesh_contacts"] = True
-    trunk_body_id = _required_id(native_model, mujoco_api.mjtObj.mjOBJ_BODY, "trunk_base")
+    entity_views = {
+        name: _resolve_entity_view(native_model, cfg, device=device_obj)
+        for name, cfg in scene_entities.items()
+    }
+    robot_view = entity_views.get("robot") or entity_views[entity_cfg.name]
+    trunk_body_id = robot_view.root_body_id
     head_body_ids = tuple(
         int(body_id)
-        for body_name in (
-            "neck",
-            "neck_pitch",
-            "yaw_roll_motion",
-            "bottom_head_shell",
-            "jaw_soft",
-            "bearing_roll",
-        )
+        for body_name in entity_cfg.head_body_names
         if (body_id := mujoco_api.mj_name2id(native_model, mujoco_api.mjtObj.mjOBJ_BODY, body_name))
         >= 0
     )
-    foot_site_ids_resolved = _resolve_selector(
-        native_model,
-        mujoco_api.mjtObj.mjOBJ_SITE,
-        entity_cfg.foot_site_selector,
-    )
-    if len(foot_site_ids_resolved) != 2:
-        raise ValueError(
-            "The current velocity observation contract requires exactly two foot sites; "
-            f"selector resolved {foot_site_ids_resolved!r}"
+    if entity_cfg.foot_site_selector is None:
+        foot_site_ids_resolved: tuple[int, ...] = ()
+        foot_geom_groups: tuple[tuple[int, ...], ...] = ()
+    else:
+        foot_site_ids_resolved = _resolve_selector(
+            native_model,
+            mujoco_api.mjtObj.mjOBJ_SITE,
+            entity_cfg.foot_site_selector,
         )
-    foot_geom_groups = tuple(
-        _resolve_selector(native_model, mujoco_api.mjtObj.mjOBJ_GEOM, selector)
-        for selector in entity_cfg.foot_contact_selectors
-    )
-    if any(not group for group in foot_geom_groups):
-        raise ValueError("Each foot contact selector must resolve at least one geometry")
+        if len(foot_site_ids_resolved) != 2:
+            raise ValueError(
+                "The current velocity observation contract requires exactly two foot sites; "
+                f"selector resolved {foot_site_ids_resolved!r}"
+            )
+        if entity_cfg.foot_contact_selectors is None:
+            raise ValueError("Foot contact selectors are required when foot sites are configured")
+        foot_geom_groups = tuple(
+            _resolve_selector(native_model, mujoco_api.mjtObj.mjOBJ_GEOM, selector)
+            for selector in entity_cfg.foot_contact_selectors
+        )
+        if any(not group for group in foot_geom_groups):
+            raise ValueError("Each foot contact selector must resolve at least one geometry")
     return MicroDuckModelBundle(
         xml_path=path,
         entity_cfg=entity_cfg,
@@ -509,18 +613,16 @@ def load_microduck_model(
                 ),
             )
             for name in SENSOR_NAMES
+            if mujoco_api.mj_name2id(native_model, mujoco_api.mjtObj.mjOBJ_SENSOR, name) >= 0
         },
         trunk_body_id=trunk_body_id,
         head_body_ids=head_body_ids,
-        foot_site_ids=(int(foot_site_ids_resolved[0]), int(foot_site_ids_resolved[1])),
-        foot_geom_ids=(int(foot_geom_groups[0][0]), int(foot_geom_groups[1][0])),
-        foot_geom_groups=(
-            tuple(int(value) for value in foot_geom_groups[0]),
-            tuple(int(value) for value in foot_geom_groups[1]),
-        ),
+        foot_site_ids=tuple(int(value) for value in foot_site_ids_resolved),
+        foot_geom_ids=tuple(int(group[0]) for group in foot_geom_groups),
+        foot_geom_groups=tuple(tuple(int(value) for value in group) for group in foot_geom_groups),
         collision_geom_ids=tuple(
             geom_id
-            for geom_id in range(native_model.ngeom)
+            for geom_id in robot_view.geom_ids
             if (
                 (name := mujoco_api.mj_id2name(native_model, mujoco_api.mjtObj.mjOBJ_GEOM, geom_id))
                 is not None
@@ -534,6 +636,7 @@ def load_microduck_model(
             if actuator_mode == "bam"
             else 0
         ),
+        entities=entity_views,
         action_size=int(native_model.nu),
     )
 

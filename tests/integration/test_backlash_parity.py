@@ -22,7 +22,14 @@ def test_backlash_encoder_and_bam_control_match_native():
         disable_contacts=True,
     )
     assert bundle.has_backlash
-    torch_env = ManagerBasedTaskEnv(make_microduck_velocity_env_cfg(), bundle=bundle)
+    # The native diagnostic intentionally starts with a zero command. The
+    # manager default now samples configured commands even with DR disabled,
+    # matching upstream command-manager semantics, so pin this parity fixture.
+    torch_env = ManagerBasedTaskEnv(
+        make_microduck_velocity_env_cfg(),
+        bundle=bundle,
+        command=torch.zeros(13, dtype=bundle.dtype),
+    )
     native_env = NativeMicroDuckEnv(
         bundle=bundle,
         disable_contacts=True,

@@ -100,7 +100,7 @@ def render_policy_rollout(
     width: int = 320,
     height: int = 240,
     device: str = "cpu",
-    dtype: torch.dtype = torch.float64,
+    dtype: torch.dtype = torch.float32,
     actuator_mode: ActuatorMode = "xml",
     render_backend: RenderBackend = "mujoco",
     camera: CameraName = "free",

@@ -1,9 +1,9 @@
 """Generic MuJoCo-Torch physics backend.
 
 This module owns simulation mechanics only.  It deliberately has no knowledge
-of commands, observations, rewards, terminations, or task curricula.  Task
-runtimes compose it and use the model bundle's resolved actuator mapping to
-express task-specific behavior.
+of commands, observations, rewards, terminations, or task curricula.  The
+manager-based environment composes it and uses the model bundle's resolved
+actuator mapping to express task-specific behavior above this boundary.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ class PhysicsBackend:
     The backend supports arbitrary compiled models that satisfy the model
     bundle's action/data contract.  Semantic task quantities such as feet,
     trunk pose, and commands are intentionally left to entity views and task
-    runtimes above this layer.
+    terms above this layer.
     """
 
     def __init__(
@@ -51,6 +51,7 @@ class PhysicsBackend:
         *,
         actuator_mode: str | None = None,
         decimation: int | None = None,
+        actuator_delay_lag: int | tuple[int, int] = 0,
     ) -> None:
         self.bundle = bundle
         self.actuator_mode = actuator_mode or bundle.actuator_mode
@@ -68,6 +69,17 @@ class PhysicsBackend:
         self._bam_drop_gain: torch.Tensor | float | None = None
         self._bam_friction_scale: torch.Tensor | float = 1.0
         self._base_fields: dict[str, Any] | None = None
+        if isinstance(actuator_delay_lag, tuple):
+            low, high = actuator_delay_lag
+            if low < 0 or low > high:
+                raise ValueError("actuator delay range must satisfy 0 <= low <= high")
+            self.actuator_delay_range = (low, high)
+        else:
+            if actuator_delay_lag < 0:
+                raise ValueError("actuator_delay_lag must be non-negative")
+            self.actuator_delay_range = (actuator_delay_lag, actuator_delay_lag)
+        self.actuator_delay_lag = 0
+        self._actuator_delay_buffer: list[torch.Tensor] = []
 
     @property
     def data(self) -> Any | None:
@@ -113,7 +125,15 @@ class PhysicsBackend:
     def sample_delay(self, low: int, high: int) -> int:
         if low == high:
             return low
-        return int(torch.randint(low, high + 1, (), generator=self._generator).item())
+        return int(
+            torch.randint(
+                low,
+                high + 1,
+                (),
+                generator=self._generator,
+                device=self.device,
+            ).item()
+        )
 
     def set_seed(self, seed: int | None) -> None:
         if seed is not None:
@@ -225,6 +245,10 @@ class PhysicsBackend:
             previous_torque=self.state.previous_torque.clone(),
             friction_scale=self._bam_friction_scale,
         )
+        self.actuator_delay_lag = self.sample_delay(*self.actuator_delay_range)
+        self._actuator_delay_buffer = [
+            self.bundle.default_pose.clone() for _ in range(self.actuator_delay_lag)
+        ]
         return self.data
 
     def forward(
@@ -325,7 +349,16 @@ class PhysicsBackend:
         if data is None:
             raise RuntimeError("Physics backend has no data during step")
         for _ in range(self.decimation):
-            ctrl = self.compute_control(target) if self.actuator_mode == "bam" else target
+            if self.actuator_delay_lag:
+                self._actuator_delay_buffer.append(target.clone())
+                delayed_target = self._actuator_delay_buffer.pop(0)
+            else:
+                delayed_target = target
+            ctrl = (
+                self.compute_control(delayed_target)
+                if self.actuator_mode == "bam"
+                else delayed_target
+            )
             data = data.replace(ctrl=ctrl)
             data = mujoco_torch.step(
                 self.bundle.torch_model,

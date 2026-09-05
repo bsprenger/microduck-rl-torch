@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from microduck_rl_torch.envs.scene import TerrainCfg
+from microduck_rl_torch.envs.scene import TerrainCfg, make_microduck_rough_scene
 from microduck_rl_torch.envs.task_config import TaskEnvCfg
 from microduck_rl_torch.robot import MICRODUCK_WALK_ROBOT_CFG
 
@@ -22,7 +22,14 @@ def make_microduck_velocity_env_cfg(
     cfg.scene.scene_xml = MICRODUCK_WALK_ROBOT_CFG.load_path
     cfg.scene.terrain = TerrainCfg(
         kind="generator" if rough else "plane",
-        params={"source": "MICRODUCK_ROUGH_TERRAINS_CFG"} if rough else {},
+        generator=make_microduck_rough_scene if rough else None,
+        params={
+            "source": "MICRODUCK_ROUGH_TERRAINS_CFG",
+            "rows": 10,
+            "cols": 20,
+        }
+        if rough
+        else {},
     )
     cfg.play = play
     cfg.metadata.update(
