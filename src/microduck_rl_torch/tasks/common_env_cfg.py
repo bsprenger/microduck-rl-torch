@@ -6,6 +6,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 from microduck_rl_torch.envs.config import CommandConfig, MicroDuckVelocityConfig
+from microduck_rl_torch.envs.core import VelocityTaskRuntime
 from microduck_rl_torch.envs.managers import bad_orientation, timeout
 from microduck_rl_torch.envs.scene import SceneCfg, SensorCfg, TerrainCfg
 from microduck_rl_torch.envs.task_config import (
@@ -120,6 +121,7 @@ def make_velocity_env_cfg(*, play: bool = False) -> TaskEnvCfg:
         ),
         curriculum=TermCollection(),
         runtime=runtime,
+        runtime_factory=VelocityTaskRuntime,
         play=play,
         metadata={
             "family": "velocity",

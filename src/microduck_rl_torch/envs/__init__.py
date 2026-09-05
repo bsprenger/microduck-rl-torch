@@ -2,8 +2,9 @@
 
 from .actuation import BamM6Parameters
 from .config import MicroDuckVelocityConfig
-from .core import EnvStep, ManagerBasedTaskEnv, MicroDuckRuntimeState, NominalMicroDuckEnv
+from .core import EnvStep, ManagerBasedTaskEnv, MicroDuckRuntimeState, VelocityTaskRuntime
 from .model import MicroDuckModelBundle, ModelBundle, default_scene_path
+from .physics import PhysicsBackend, PhysicsState
 from .scene import EntityCfg, SceneBuild, SceneBuilder, SceneCfg, SemanticSelector, TerrainCfg
 from .task_config import (
     ActionCfg,
@@ -20,9 +21,11 @@ __all__ = [
     "MicroDuckModelBundle",
     "ModelBundle",
     "MicroDuckRuntimeState",
+    "VelocityTaskRuntime",
     "MicroDuckVelocityConfig",
     "ManagerBasedTaskEnv",
-    "NominalMicroDuckEnv",
+    "PhysicsBackend",
+    "PhysicsState",
     "ActionCfg",
     "EntityCfg",
     "ObservationGroupCfg",

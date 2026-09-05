@@ -4,8 +4,9 @@ import numpy as np
 import pytest
 import torch
 
-from microduck_rl_torch.envs.core import NominalMicroDuckEnv
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
 from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 from microduck_rl_torch_verification.native import NativeMicroDuckEnv
 
 
@@ -21,7 +22,7 @@ def test_backlash_encoder_and_bam_control_match_native():
         disable_contacts=True,
     )
     assert bundle.has_backlash
-    torch_env = NominalMicroDuckEnv(bundle)
+    torch_env = ManagerBasedTaskEnv(make_microduck_velocity_env_cfg(), bundle=bundle)
     native_env = NativeMicroDuckEnv(
         bundle=bundle,
         disable_contacts=True,

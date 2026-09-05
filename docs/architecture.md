@@ -30,7 +30,8 @@ TaskEnvCfg
   └── runtime settings             device-independent task parameters
 
 ManagerBasedTaskEnv
-  ├── ModelBundle                  MuJoCo/Torch state and semantic handles
+  ├── PhysicsBackend                generic MuJoCo/Torch model and stepping
+  ├── task runtime                  task-owned state and lifecycle callbacks
   ├── ActionManager                delay, scaling, actuator target
   ├── CommandManager               command resampling
   ├── ObservationManager           actor/critic groups
@@ -40,10 +41,11 @@ ManagerBasedTaskEnv
   └── CurriculumManager            optional task progression
 ```
 
-`NominalMicroDuckEnv` remains available as the compatibility path used by
-existing callers. The manager-based velocity task is checked against it by a
-fixed action trace, and the native MuJoCo golden fixture remains independent
-of both implementations.
+`PhysicsBackend` is the low-level simulation boundary. It owns model/data
+creation, actuator application, solver stepping, and model-field restoration;
+it does not know about velocity commands or reward terms. The velocity task
+runtime is composed by `ManagerBasedTaskEnv`, and the native MuJoCo golden
+fixture remains independent of the Torch implementation.
 
 ## Model variants
 

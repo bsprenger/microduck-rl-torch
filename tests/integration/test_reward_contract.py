@@ -4,8 +4,9 @@ import numpy as np
 import pytest
 import torch
 
-from microduck_rl_torch.envs import NominalMicroDuckEnv
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
 from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 
 @pytest.mark.integration
@@ -19,7 +20,9 @@ def test_head_pose_reward_uses_home_relative_command_and_backlash_output():
         disable_contacts=True,
     )
     command = torch.zeros(13, dtype=bundle.dtype)
-    environment = NominalMicroDuckEnv(bundle, command=command)
+    environment = ManagerBasedTaskEnv(
+        make_microduck_velocity_env_cfg(), bundle=bundle, command=command
+    )
     environment.reset()
     result = environment.step(torch.zeros(bundle.action_size, dtype=bundle.dtype))
     assert environment.data is not None

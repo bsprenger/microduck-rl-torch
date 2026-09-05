@@ -1,21 +1,12 @@
-"""Policy-facing MicroDuck velocity environment."""
+"""Manager-based task runtime and task-facing environment facade."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
-import mujoco
-import mujoco_torch
 import torch
 
-from .actuation import (
-    BamRuntime,
-    apply_bam_fields,
-    external_torque,
-    friction_budget,
-    motor_torque,
-)
 from .config import MicroDuckVelocityConfig, sample_command, sample_twist, sample_uniform
 from .managers import (
     ActionManager,
@@ -26,13 +17,12 @@ from .managers import (
     RewardManager,
     TerminationManager,
 )
-from .model import MicroDuckModelBundle, load_microduck_model
+from .model import ModelBundle, load_microduck_model
 from .observations import build_actor_observation
+from .physics import PhysicsBackend
 from .rewards import compute_reward, foot_contact_mask
 from .scene import SceneBuild, SceneBuilder
 from .task_config import TaskEnvCfg
-
-mujoco_api: Any = mujoco
 
 
 @dataclass(frozen=True)
@@ -89,19 +79,19 @@ def _quat_from_euler(roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Tensor)
     )
 
 
-class NominalMicroDuckEnv:
-    """A scalar eager environment matching the upstream velocity task.
+class VelocityTaskRuntime:
+    """Velocity task lifecycle composed around a generic physics backend.
 
-    The state is deliberately explicit so the same ordering can later be
-    lifted to ``torch.vmap`` without hiding delays or randomization in global
-    buffers. A single environment is currently supported; this is the
-    reference path used by the native-vs-Torch trajectory tests.
+    This component owns command, observation, reward, and velocity-task state.
+    It deliberately does not own model compilation or physics stepping; those
+    responsibilities belong to :class:`PhysicsBackend`.
     """
 
     def __init__(
         self,
-        bundle: MicroDuckModelBundle,
+        bundle: ModelBundle,
         *,
+        physics: PhysicsBackend | None = None,
         command: torch.Tensor | None = None,
         action_scale: float = 1.0,
         decimation: int | None = None,
@@ -110,17 +100,16 @@ class NominalMicroDuckEnv:
         action_delay_lag: int | tuple[int, int] = 0,
         domain_randomization: bool = False,
     ) -> None:
-        self.bundle = bundle
+        self.physics = physics or PhysicsBackend(
+            bundle,
+            actuator_mode=actuator_mode,
+            decimation=decimation,
+        )
+        self.bundle = self.physics.bundle
         self.action_scale = action_scale
-        self.decimation = decimation if decimation is not None else bundle.decimation
-        if self.decimation < 1:
-            raise ValueError("decimation must be positive")
+        self.decimation = self.physics.decimation
         self.config = config or MicroDuckVelocityConfig()
-        self.actuator_mode = actuator_mode or bundle.actuator_mode
-        if self.actuator_mode not in {"bam", "xml"}:
-            raise ValueError("actuator_mode must be 'bam' or 'xml'")
-        if self.actuator_mode == "bam" and bundle.bam_parameters is None:
-            raise ValueError("BAM environment requested with a non-BAM model bundle")
+        self.actuator_mode = self.physics.actuator_mode
         self._fixed_command = command is not None
         self.command = (
             torch.zeros(13, dtype=bundle.dtype, device=bundle.device)
@@ -139,15 +128,14 @@ class NominalMicroDuckEnv:
                 raise ValueError("action_delay_lag must be non-negative")
             self.action_delay_range = (action_delay_lag, action_delay_lag)
         self.domain_randomization = domain_randomization
-        self.data: Any | None = None
         self.state: MicroDuckRuntimeState | None = None
-        self.last_action = torch.zeros(bundle.action_size, dtype=bundle.dtype, device=bundle.device)
-        self.step_count = 0
-        self._generator: torch.Generator | None = None
-        self._bam_runtime: BamRuntime | None = None
-        # These are installed by ManagerBasedTaskEnv.  Keeping the attributes
-        # on the legacy runtime makes the delegation points explicit and keeps
-        # the old NominalMicroDuckEnv API behavior unchanged.
+        self.last_action = torch.zeros(
+            self.bundle.action_size, dtype=self.bundle.dtype, device=self.bundle.device
+        )
+        self._generator = self.physics._generator
+        # These are installed by ManagerBasedTaskEnv.  Keeping the manager
+        # references on the task runtime makes the task lifecycle explicit,
+        # while the parent environment remains a generic composition shell.
         self.action_manager: ActionManager | None = None
         self.command_manager: CommandManager | None = None
         self.observation_manager: ObservationManager | None = None
@@ -156,21 +144,54 @@ class NominalMicroDuckEnv:
         self.event_manager: EventManager | None = None
         self.curriculum_manager: CurriculumManager | None = None
 
+    @property
+    def data(self) -> Any | None:
+        return self.physics.data
+
+    @data.setter
+    def data(self, value: Any | None) -> None:
+        self.physics.data = value
+
+    @property
+    def step_count(self) -> int:
+        return self.physics.step_count
+
+    @step_count.setter
+    def step_count(self, value: int) -> None:
+        self.physics.state.step_count = value
+
+    @property
+    def _bam_vin(self) -> torch.Tensor | None:
+        return self.physics._bam_vin
+
+    @_bam_vin.setter
+    def _bam_vin(self, value: torch.Tensor | None) -> None:
+        self.physics._bam_vin = value
+
+    @property
+    def _bam_drop_gain(self) -> torch.Tensor | float | None:
+        return self.physics._bam_drop_gain
+
+    @_bam_drop_gain.setter
+    def _bam_drop_gain(self, value: torch.Tensor | float | None) -> None:
+        self.physics._bam_drop_gain = value
+
+    @property
+    def _bam_friction_scale(self) -> torch.Tensor | float:
+        return self.physics._bam_friction_scale
+
+    @_bam_friction_scale.setter
+    def _bam_friction_scale(self, value: torch.Tensor | float) -> None:
+        self.physics._bam_friction_scale = value
+
     def _random(self, *, dtype: torch.dtype | None = None) -> torch.Tensor:
-        return torch.rand(
-            (),
-            generator=self._generator,
-            dtype=dtype or self.bundle.dtype,
-            device=self.bundle.device,
-        )
+        return self.physics.random(dtype=dtype)
 
     def _sample_range(self, low: float, high: float) -> torch.Tensor:
-        return self._random() * (high - low) + low
+        return self.physics.sample_range(low, high)
 
     def _sample_delay(self, low: int, high: int) -> int:
-        if low == high:
-            return low
-        return int(torch.randint(low, high + 1, (), generator=self._generator).item())
+        return self.physics.sample_delay(low, high)
 
     def _initial_observation(self) -> tuple[torch.Tensor, torch.Tensor]:
         if self.data is None:
@@ -182,81 +203,42 @@ class NominalMicroDuckEnv:
         return base_ang_vel, gravity
 
     def _joint_measurements(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return encoder position and motor-side velocity in actuator order."""
+        """Return resolved output position and motor velocity in actuator order."""
 
-        if self.data is None:
-            raise RuntimeError("Call reset() before reading joint measurements")
-        position = self.data.qpos.index_select(-1, self.bundle.qpos_indices)
-        motor_velocity = self.data.qvel.index_select(-1, self.bundle.qvel_indices)
-        if self.bundle.has_backlash:
-            backlash_position = self.data.qpos.index_select(-1, self.bundle.backlash_qpos_indices)
-            position = position + backlash_position * self.bundle.backlash_mask
-        return position, motor_velocity
+        return self.physics.actuator_measurements()
 
     def _encoder_velocity(self) -> torch.Tensor:
         """Return the output-side velocity seen by the encoder."""
 
-        if self.data is None:
-            raise RuntimeError("Call reset() before reading joint measurements")
-        velocity = self.data.qvel.index_select(-1, self.bundle.qvel_indices)
-        if self.bundle.has_backlash:
-            backlash_velocity = self.data.qvel.index_select(-1, self.bundle.backlash_qvel_indices)
-            velocity = velocity + backlash_velocity * self.bundle.backlash_mask
-        return velocity
+        return self.physics.encoder_velocity()
 
     def _restore_model_defaults(self) -> None:
         """Restore scalar model fields before applying a fresh DR sample."""
-
-        if not hasattr(self, "_base_dof_armature"):
-            self._base_dof_armature = self.bundle.torch_model.dof_armature.clone()
-            self._base_dof_frictionloss = self.bundle.torch_model.dof_frictionloss.clone()
-            self._base_dof_damping = self.bundle.torch_model.dof_damping.clone()
-            self._base_body_mass = self.bundle.torch_model.body_mass.clone()
-            self._base_body_inertia = self.bundle.torch_model.body_inertia.clone()
-            self._base_body_ipos = self.bundle.torch_model.body_ipos.clone()
-            self._base_geom_friction = self.bundle.torch_model.geom_friction.clone()
-            self._base_native_dof_armature = self.bundle.native_model.dof_armature.copy()
-            self._base_native_dof_frictionloss = self.bundle.native_model.dof_frictionloss.copy()
-            self._base_native_dof_damping = self.bundle.native_model.dof_damping.copy()
-            self._base_native_body_mass = self.bundle.native_model.body_mass.copy()
-            self._base_native_body_inertia = self.bundle.native_model.body_inertia.copy()
-            self._base_native_body_ipos = self.bundle.native_model.body_ipos.copy()
-            self._base_native_geom_friction = self.bundle.native_model.geom_friction.copy()
-        self.bundle.torch_model.dof_armature[:] = self._base_dof_armature
-        self.bundle.torch_model.dof_frictionloss[:] = self._base_dof_frictionloss
-        self.bundle.torch_model.dof_damping[:] = self._base_dof_damping
-        self.bundle.torch_model.body_mass[:] = self._base_body_mass
-        self.bundle.torch_model.body_inertia[:] = self._base_body_inertia
-        self.bundle.torch_model.body_ipos[:] = self._base_body_ipos
-        self.bundle.torch_model.geom_friction[:] = self._base_geom_friction
-        self.bundle.native_model.dof_armature[:] = self._base_native_dof_armature
-        self.bundle.native_model.dof_frictionloss[:] = self._base_native_dof_frictionloss
-        self.bundle.native_model.dof_damping[:] = self._base_native_dof_damping
-        self.bundle.native_model.body_mass[:] = self._base_native_body_mass
-        self.bundle.native_model.body_inertia[:] = self._base_native_body_inertia
-        self.bundle.native_model.body_ipos[:] = self._base_native_body_ipos
-        self.bundle.native_model.geom_friction[:] = self._base_native_geom_friction
-        mujoco_api.mj_setConst(
-            self.bundle.native_model, mujoco_api.MjData(self.bundle.native_model)
-        )
+        self.physics.restore_model_defaults()
 
     def _apply_domain_randomization(self) -> None:
         if not self.domain_randomization:
             return
+        base_dof_armature = self.physics.base_field("dof_armature")
+        base_body_mass = self.physics.base_field("body_mass")
+        base_body_inertia = self.physics.base_field("body_inertia")
+        base_geom_friction = self.physics.base_field("geom_friction")
+        base_native_dof_armature = self.physics.base_field("native_dof_armature")
+        base_native_body_mass = self.physics.base_field("native_body_mass")
+        base_native_body_inertia = self.physics.base_field("native_body_inertia")
+        base_native_geom_friction = self.physics.base_field("native_geom_friction")
         randomization = self.config.randomization
         trunk = self.bundle.trunk_body_id
         if self.config.randomize_mass_inertia:
             mass_scale = self._sample_range(*randomization.mass_inertia_range)
-            self.bundle.torch_model.body_mass[trunk] = self._base_body_mass[trunk] * mass_scale
-            self.bundle.torch_model.body_inertia[trunk] = (
-                self._base_body_inertia[trunk] * mass_scale
-            )
-            self.bundle.native_model.body_mass[trunk] = self._base_native_body_mass[trunk] * float(
+            self.bundle.torch_model.body_mass[trunk] = base_body_mass[trunk] * mass_scale
+            self.bundle.torch_model.body_inertia[trunk] = base_body_inertia[trunk] * mass_scale
+            self.bundle.native_model.body_mass[trunk] = base_native_body_mass[trunk] * float(
                 mass_scale
             )
-            self.bundle.native_model.body_inertia[trunk] = self._base_native_body_inertia[
-                trunk
-            ] * float(mass_scale)
+            self.bundle.native_model.body_inertia[trunk] = base_native_body_inertia[trunk] * float(
+                mass_scale
+            )
         if self.config.randomize_com:
             com_delta = (
                 torch.rand(
@@ -290,22 +272,22 @@ class NominalMicroDuckEnv:
                 {geom_id for group in self.bundle.foot_geom_groups for geom_id in group}
             )
             self.bundle.torch_model.geom_friction[foot_ids] = (
-                self._base_geom_friction[foot_ids] * foot_scale
+                base_geom_friction[foot_ids] * foot_scale
             )
-            self.bundle.native_model.geom_friction[foot_ids] = self._base_native_geom_friction[
+            self.bundle.native_model.geom_friction[foot_ids] = base_native_geom_friction[
                 foot_ids
             ] * float(foot_scale)
         if self.config.randomize_armature:
             armature_scale = self._sample_range(*randomization.armature_range)
             self.bundle.torch_model.dof_armature[self.bundle.qvel_indices] = (
-                self._base_dof_armature[self.bundle.qvel_indices] * armature_scale
+                base_dof_armature[self.bundle.qvel_indices] * armature_scale
             )
             indices = self.bundle.qvel_indices.cpu().numpy()
-            self.bundle.native_model.dof_armature[indices] = self._base_native_dof_armature[
+            self.bundle.native_model.dof_armature[indices] = base_native_dof_armature[
                 indices
             ] * float(armature_scale)
         if self.actuator_mode == "bam":
-            if not hasattr(self, "_bam_vin"):
+            if self._bam_vin is None:
                 self._bam_vin = self._sample_range(6.5, 8.2)
                 self._bam_drop_gain = self._sample_range(0.0, 0.2)
             self._bam_friction_scale = (
@@ -319,6 +301,11 @@ class NominalMicroDuckEnv:
             self._bam_friction_scale = torch.ones(
                 (), dtype=self.bundle.dtype, device=self.bundle.device
             )
+        self.physics.configure_bam(
+            vin=self._bam_vin,
+            drop_gain=self._bam_drop_gain,
+            friction_scale=self._bam_friction_scale,
+        )
 
     def reset(
         self,
@@ -327,9 +314,8 @@ class NominalMicroDuckEnv:
         seed: int | None = None,
         randomize: bool | None = None,
     ) -> torch.Tensor:
-        if seed is not None:
-            self._generator = torch.Generator(device=self.bundle.device)
-            self._generator.manual_seed(seed)
+        self.physics.set_seed(seed)
+        self._generator = self.physics._generator
         if randomize is not None:
             self.domain_randomization = randomize
         if command is not None:
@@ -348,8 +334,7 @@ class NominalMicroDuckEnv:
                 device=self.bundle.device,
                 dtype=self.bundle.dtype,
             )
-        self.data = self.bundle.new_data()
-        qpos = self.data.qpos.clone()
+        qpos = self.bundle.default_qpos.clone()
         if self.domain_randomization:
             qpos[2] = self._sample_range(*self.config.initial_height_range)
         if self.domain_randomization and self.config.randomize_base_orientation:
@@ -366,24 +351,30 @@ class NominalMicroDuckEnv:
                 )
             )
             qpos[3:7] = _quat_from_euler(roll, pitch, torch.zeros_like(roll))
-        qvel = torch.zeros_like(self.data.qvel)
+        qvel = torch.zeros(
+            self.bundle.native_model.nv,
+            dtype=self.bundle.dtype,
+            device=self.bundle.device,
+        )
         reset_ctrl = (
-            torch.zeros_like(self.data.ctrl)
+            torch.zeros(
+                self.bundle.native_model.nu,
+                dtype=self.bundle.dtype,
+                device=self.bundle.device,
+            )
             if self.actuator_mode == "bam"
-            else self.bundle.default_pose
+            else self.bundle.default_pose.clone()
         )
-        self.data = mujoco_torch.forward(
-            self.bundle.torch_model,
-            self.data.replace(qpos=qpos, qvel=qvel, ctrl=reset_ctrl),
-            fixed_iterations=self.bundle.fixed_iterations,
-        )
+        self.physics.reset(qpos=qpos, qvel=qvel, ctrl=reset_ctrl)
         base_ang_vel, gravity = self._initial_observation()
-        foot_positions = self.data.site_xpos[list(self.bundle.foot_site_ids)].clone()
+        data = self.data
+        if data is None:
+            raise RuntimeError("Physics backend did not produce data during reset")
+        foot_positions = data.site_xpos[list(self.bundle.foot_site_ids)].clone()
         zero_action = torch.zeros(
             self.bundle.action_size, dtype=self.bundle.dtype, device=self.bundle.device
         )
         self.last_action = zero_action.clone()
-        self.step_count = 0
         low_delay, high_delay = self.action_delay_range
         delay_lag = self._sample_delay(low_delay, high_delay)
         if (
@@ -393,16 +384,6 @@ class NominalMicroDuckEnv:
         ):
             delay_lag = self._sample_delay(3, 6)
         imu_lag = self._sample_delay(*self.config.imu_delay_lag) if self.domain_randomization else 0
-        self._bam_runtime = BamRuntime(
-            previous_torque=torch.zeros(
-                self.bundle.action_size, dtype=self.bundle.dtype, device=self.bundle.device
-            ),
-            friction_scale=getattr(
-                self,
-                "_bam_friction_scale",
-                torch.ones((), dtype=self.bundle.dtype, device=self.bundle.device),
-            ),
-        )
         self.state = MicroDuckRuntimeState(
             last_action=zero_action.clone(),
             previous_action=zero_action.clone(),
@@ -514,35 +495,6 @@ class NominalMicroDuckEnv:
             return self.observation_manager.compute(self, "actor")
         return self._build_actor_observation()
 
-    def _bam_control(self, target: torch.Tensor) -> torch.Tensor:
-        if self.data is None or self._bam_runtime is None or self.bundle.bam_parameters is None:
-            raise RuntimeError("BAM state is not initialized")
-        parameters = self.bundle.bam_parameters
-        position, velocity = self._joint_measurements()
-        vin = getattr(self, "_bam_vin", parameters.vin)
-        drop_gain = getattr(self, "_bam_drop_gain", parameters.vin_drop_gain)
-        if drop_gain is not None:
-            vin = vin - drop_gain * self._bam_runtime.previous_torque.abs().sum()
-            if parameters.vin_min is not None:
-                vin = torch.clamp(vin, min=parameters.vin_min)
-        torque = motor_torque(target, position, velocity, params=parameters, vin=vin)
-        load = external_torque(self.data, self.bundle.qvel_indices, self.bundle.friction_dof_count)
-        friction, damping = friction_budget(
-            self._bam_runtime.previous_torque,
-            load,
-            velocity,
-            params=parameters,
-            friction_scale=self._bam_runtime.friction_scale,
-        )
-        apply_bam_fields(self.bundle.torch_model, self.bundle.qvel_indices, friction, damping)
-        # MuJoCo refreshes this derived solver array from Model during
-        # mj_step.  ``mujoco-torch`` stores it in Data, so update it explicitly
-        # when the stateful BAM budget changes between substeps.
-        efc_frictionloss = self.data.efc_frictionloss.clone()
-        efc_frictionloss[: self.bundle.friction_dof_count] = friction
-        self.data = self.data.replace(efc_frictionloss=efc_frictionloss)
-        return torque
-
     def _apply_push(self) -> None:
         if (
             self.data is None
@@ -559,11 +511,7 @@ class NominalMicroDuckEnv:
         )
         qvel = self.data.qvel.clone()
         qvel[:2] += push
-        self.data = mujoco_torch.forward(
-            self.bundle.torch_model,
-            self.data.replace(qvel=qvel),
-            fixed_iterations=self.bundle.fixed_iterations,
-        )
+        self.physics.forward(qvel=qvel)
         self.state.next_push_step = self.step_count + self._next_interval_step(
             self.config.randomization.velocity_push_interval
         )
@@ -573,12 +521,11 @@ class NominalMicroDuckEnv:
             self.reset()
         if self.data is None or self.state is None:
             raise RuntimeError("Call reset() before step()")
-        bam_runtime = self._bam_runtime
-        if self.actuator_mode == "bam" and bam_runtime is None:
-            raise RuntimeError("BAM state is not initialized")
         action = torch.as_tensor(action, dtype=self.bundle.dtype, device=self.bundle.device)
         if action.shape != (self.bundle.action_size,):
-            raise ValueError(f"Expected action shape (14,), got {tuple(action.shape)}")
+            raise ValueError(
+                f"Expected action shape ({self.bundle.action_size},), got {tuple(action.shape)}"
+            )
         if not torch.isfinite(action).all():
             raise ValueError("Action contains non-finite values")
         if self.event_manager is not None:
@@ -596,26 +543,9 @@ class NominalMicroDuckEnv:
             delayed_index = (self.step_count - self.state.delay_lag) % len(self.state.delay_buffer)
             applied_action = self.state.delay_buffer[delayed_index]
             target = self.bundle.default_pose + self.action_scale * applied_action
-        for _ in range(self.decimation):
-            if self.actuator_mode == "bam":
-                torque = self._bam_control(target)
-                self.data = self.data.replace(ctrl=torque)
-            else:
-                self.data = self.data.replace(ctrl=target)
-            self.data = mujoco_torch.step(
-                self.bundle.torch_model,
-                self.data,
-                fixed_iterations=self.bundle.fixed_iterations,
-            )
-            if self.actuator_mode == "bam":
-                if bam_runtime is None:
-                    raise RuntimeError("BAM state is not initialized")
-                bam_runtime.previous_torque = self.data.qfrc_actuator.index_select(
-                    -1, self.bundle.qvel_indices
-                ).clone()
+        self.physics.step(target)
         self.state.last_action = action.clone()
         self.last_action = action.clone()
-        self.step_count += 1
         current_contact = foot_contact_mask(self.data, self.bundle)
         touchdown = current_contact & ~previous_foot_contact
         self.state.foot_air_time = torch.where(
@@ -766,25 +696,27 @@ class NominalMicroDuckEnv:
         }
 
 
-class ManagerBasedTaskEnv(NominalMicroDuckEnv):
-    """Composition-based Torch runtime for an upstream-shaped task config.
+class ManagerBasedTaskEnv:
+    """Generic manager-based environment composed from a task runtime/backend.
 
-    The physics implementation remains the parity-tested scalar runtime in
-    ``NominalMicroDuckEnv``.  This class supplies the manager graph and model
-    selection from ``TaskEnvCfg`` so future task factories can mutate scene,
-    entity, command, observation, reward, event, and termination behavior
-    without creating another monolithic environment subclass.
+    The environment owns configuration, scene selection, and the manager graph.
+    A task runtime owns task-specific state and lifecycle callbacks, while the
+    physics backend owns model/data creation and simulation stepping.  This
+    mirrors upstream's separation between ``ManagerBasedRlEnv`` and task MDP
+    functions without making the Torch environment inherit from a
+    task-specific implementation.
     """
 
     def __init__(
         self,
         task_cfg: TaskEnvCfg,
         *,
-        bundle: MicroDuckModelBundle | None = None,
+        bundle: ModelBundle | None = None,
         command: torch.Tensor | None = None,
         device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
         domain_randomization: bool | None = None,
+        runtime_factory: Any | None = None,
         **load_options: Any,
     ) -> None:
         if "robot" not in task_cfg.scene.entities:
@@ -800,8 +732,17 @@ class ManagerBasedTaskEnv(NominalMicroDuckEnv):
                 actuator_mode=task_cfg.actions.actuator_mode,
                 **load_options,
             )
-        super().__init__(
+        self.physics = PhysicsBackend(
             bundle,
+            actuator_mode=task_cfg.actions.actuator_mode,
+            decimation=load_options.get("decimation"),
+        )
+        runtime_type = runtime_factory or getattr(task_cfg, "runtime_factory", None)
+        if runtime_type is None:
+            runtime_type = VelocityTaskRuntime
+        self.runtime = runtime_type(
+            bundle,
+            physics=self.physics,
             command=command,
             action_scale=task_cfg.actions.scale,
             config=task_cfg.runtime,
@@ -831,6 +772,75 @@ class ManagerBasedTaskEnv(NominalMicroDuckEnv):
         self.termination_manager = TerminationManager(task_cfg.terminations)
         self.event_manager = EventManager(task_cfg.events)
         self.curriculum_manager = CurriculumManager(task_cfg.curriculum)
+        self.runtime.action_manager = self.action_manager
+        self.runtime.command_manager = self.command_manager
+        self.runtime.observation_manager = self.observation_manager
+        self.runtime.reward_manager = self.reward_manager
+        self.runtime.termination_manager = self.termination_manager
+        self.runtime.event_manager = self.event_manager
+        self.runtime.curriculum_manager = self.curriculum_manager
+
+    @property
+    def bundle(self) -> ModelBundle:
+        return self.physics.bundle
+
+    @property
+    def data(self) -> Any | None:
+        return self.physics.data
+
+    @data.setter
+    def data(self, value: Any | None) -> None:
+        self.physics.data = value
+
+    @property
+    def state(self) -> MicroDuckRuntimeState | None:
+        return self.runtime.state
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.runtime.command
+
+    @property
+    def config(self) -> Any:
+        return self.runtime.config
+
+    @property
+    def domain_randomization(self) -> bool:
+        return self.runtime.domain_randomization
+
+    @domain_randomization.setter
+    def domain_randomization(self, value: bool) -> None:
+        self.runtime.domain_randomization = value
+
+    @property
+    def step_count(self) -> int:
+        return self.physics.step_count
+
+    @property
+    def decimation(self) -> int:
+        return self.physics.decimation
+
+    @property
+    def actuator_mode(self) -> str:
+        return self.physics.actuator_mode
+
+    def reset(
+        self,
+        command: torch.Tensor | None = None,
+        *,
+        seed: int | None = None,
+        randomize: bool | None = None,
+    ) -> torch.Tensor:
+        return self.runtime.reset(command, seed=seed, randomize=randomize)
+
+    def step(self, action: torch.Tensor) -> EnvStep:
+        return self.runtime.step(action)
+
+    def observation(self) -> torch.Tensor:
+        return self.runtime.observation()
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.physics.snapshot()
 
 
-__all__ = ["EnvStep", "ManagerBasedTaskEnv", "MicroDuckRuntimeState", "NominalMicroDuckEnv"]
+__all__ = ["EnvStep", "ManagerBasedTaskEnv", "MicroDuckRuntimeState", "VelocityTaskRuntime"]

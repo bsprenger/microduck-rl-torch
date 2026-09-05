@@ -3,14 +3,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from microduck_rl_torch.envs import ManagerBasedTaskEnv, NominalMicroDuckEnv
+from microduck_rl_torch.envs import ManagerBasedTaskEnv, PhysicsBackend, VelocityTaskRuntime
 from microduck_rl_torch.envs.model import load_microduck_model
 from microduck_rl_torch.envs.observations import command_vector
 from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 
 @pytest.mark.integration
-def test_manager_velocity_matches_legacy_runtime_for_fixed_trace():
+def test_manager_velocity_matches_composed_velocity_runtime_for_fixed_trace():
     bundle = load_microduck_model(
         fixed_iterations=True,
         solver_iterations=2,
@@ -19,20 +19,22 @@ def test_manager_velocity_matches_legacy_runtime_for_fixed_trace():
     )
     cfg = make_microduck_velocity_env_cfg()
     command = command_vector(vx=0.15, device=bundle.device, dtype=bundle.dtype)
-    legacy = NominalMicroDuckEnv(bundle, command=command)
+    reference = VelocityTaskRuntime(bundle, command=command)
     manager = ManagerBasedTaskEnv(cfg, bundle=bundle, command=command)
-    legacy_obs = legacy.reset(seed=17)
+    assert isinstance(manager.physics, PhysicsBackend)
+    assert manager.runtime is not manager.physics
+    reference_obs = reference.reset(seed=17)
     manager_obs = manager.reset(seed=17)
-    assert torch.equal(legacy_obs, manager_obs)
+    assert torch.equal(reference_obs, manager_obs)
 
     for index in range(6):
         action = torch.sin(torch.arange(14, dtype=bundle.dtype) + index) * 0.05
-        legacy_step = legacy.step(action)
+        reference_step = reference.step(action)
         manager_step = manager.step(action)
-        torch.testing.assert_close(manager_step.observation, legacy_step.observation)
-        torch.testing.assert_close(manager_step.reward, legacy_step.reward)
-        assert manager_step.terminated == legacy_step.terminated
-        assert manager_step.truncated == legacy_step.truncated
+        torch.testing.assert_close(manager_step.observation, reference_step.observation)
+        torch.testing.assert_close(manager_step.reward, reference_step.reward)
+        assert manager_step.terminated == reference_step.terminated
+        assert manager_step.truncated == reference_step.truncated
         assert manager_step.info["terminations"] == {
             "non_finite": False,
             "bad_orientation": False,

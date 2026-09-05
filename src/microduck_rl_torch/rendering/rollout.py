@@ -12,7 +12,7 @@ import mujoco_torch
 import numpy as np
 import torch
 
-from microduck_rl_torch.envs import ManagerBasedTaskEnv, NominalMicroDuckEnv
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
 from microduck_rl_torch.envs.model import MicroDuckModelBundle, load_microduck_model
 from microduck_rl_torch.envs.observations import command_vector
 from microduck_rl_torch.policies.huggingface import OnnxPolicy, PolicyArtifact
@@ -39,7 +39,7 @@ def _free_camera() -> Any:
 
 def _copy_torch_state_to_native(
     bundle: MicroDuckModelBundle,
-    env: NominalMicroDuckEnv,
+    env: ManagerBasedTaskEnv,
     data: Any,
 ) -> None:
     if env.data is None:
@@ -54,7 +54,7 @@ def _copy_torch_state_to_native(
 
 def _render_native(
     bundle: MicroDuckModelBundle,
-    env: NominalMicroDuckEnv,
+    env: ManagerBasedTaskEnv,
     renderer: mujoco.Renderer,
     render_data: Any,
     camera: Any,

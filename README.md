@@ -154,8 +154,8 @@ observation = env.reset(seed=0)
 ```
 
 Task configurations own scene/entity selection and ordered action, observation, reward, termination,
-event, and curriculum terms. `ManagerBasedTaskEnv` executes those terms through explicit managers;
-`NominalMicroDuckEnv` remains available for compatibility. See
+event, and curriculum terms. `ManagerBasedTaskEnv` composes a generic `PhysicsBackend` with explicit
+managers and task-owned runtime state. See
 [`docs/architecture.md`](docs/architecture.md) for the model variant and mutation conventions.
 
 The intended destination is a single PyTorch workflow that can be prototyped on CPU or Apple MPS,
@@ -281,16 +281,22 @@ detailed CAD meshes; ray processing is chunked to avoid an all-pixels/all-triang
 The native renderer is launched through the macOS `mjpython` compatibility wrapper. `ffmpeg` must
 be installed and available on `PATH` for either video or GIF output.
 
-For a direct CPU physics smoke test:
+For a direct CPU environment smoke test:
 
 ```python
 import torch
 
-from microduck_rl_torch.envs import NominalMicroDuckEnv
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
 from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
-bundle = load_microduck_model(device="cpu", disable_contacts=True)
-env = NominalMicroDuckEnv(bundle)
+cfg = make_microduck_velocity_env_cfg()
+bundle = load_microduck_model(
+    entity_cfg=cfg.scene.entities["robot"],
+    device="cpu",
+    disable_contacts=True,
+)
+env = ManagerBasedTaskEnv(cfg, bundle=bundle)
 observation = env.reset()
 result = env.step(torch.zeros(bundle.action_size, dtype=bundle.dtype))
 

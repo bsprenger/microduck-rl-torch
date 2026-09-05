@@ -121,6 +121,10 @@ class TaskEnvCfg:
     # The first task uses MicroDuckVelocityConfig. Future task families may
     # add their own runtime state/configuration without changing this schema.
     runtime: Any
+    # The generic environment supplies the backend and manager graph. A task
+    # runtime supplies only task-owned state and lifecycle hooks. This keeps
+    # future task families out of ManagerBasedTaskEnv's implementation.
+    runtime_factory: Callable[..., Any] | None = None
     play: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
