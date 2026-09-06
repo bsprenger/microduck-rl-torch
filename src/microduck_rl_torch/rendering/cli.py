@@ -59,7 +59,6 @@ def main(argv: list[str] | None = None) -> int:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-    parser.add_argument("--contacts", choices=("enabled", "disabled"), default="enabled")
     parser.add_argument(
         "--mesh-mesh-contacts",
         choices=("enabled", "disabled"),
@@ -107,7 +106,6 @@ def main(argv: list[str] | None = None) -> int:
         fixed_iterations=args.fixed_iterations,
         solver_iterations=args.solver_iterations,
         line_search_iterations=args.line_search_iterations,
-        disable_contacts=args.contacts == "disabled",
         disable_mesh_mesh_contacts=args.mesh_mesh_contacts == "disabled",
         gif_fps=args.gif_fps,
         gif_width=args.gif_width,

@@ -2,14 +2,14 @@ import pytest
 import torch
 
 from microduck_rl_torch.envs import ManagerBasedTaskEnv
-from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs.model import load_model_bundle
 from microduck_rl_torch.envs.rewards import foot_contact_mask
 from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 
 @pytest.mark.integration
 def test_environment_reset_and_short_rollout():
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         fixed_iterations=True,
         solver_iterations=2,
         line_search_iterations=2,
@@ -26,7 +26,7 @@ def test_environment_reset_and_short_rollout():
 
 @pytest.mark.integration
 def test_environment_contact_path_is_finite():
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         fixed_iterations=True,
         solver_iterations=2,
         line_search_iterations=2,

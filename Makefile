@@ -13,7 +13,7 @@ CONTACTS ?= disabled
 CONTACT_ARGS = $(if $(filter enabled,$(CONTACTS)),,--disable-contacts)
 
 .PHONY: help install install-upstream install-benchmark reinstall-mujoco-torch lock lock-check format lint typecheck deptry check test coverage \
-	fetch-golden-policy validate-policy validate-env verify-quick \
+	fetch-golden-policy fetch-all-policies validate-policy validate-env verify-quick \
 	warp-parity validate-warp-parity \
 	benchmark-physics \
 	render-golden render-golden-torch render-golden-native render-golden-ray convert-gif render-golden-gif render-golden-10s \
@@ -28,6 +28,7 @@ help:
 	@echo "  make check                Run formatting, lint, type, and dependency checks"
 	@echo "  make test                 Run the test suite"
 	@echo "  make fetch-golden-policy Download and verify the official HF ONNX policy"
+	@echo "  make fetch-all-policies Download every ONNX policy declared by the HF manifest"
 	@echo "  make validate-env         Run native-vs-mujoco-torch env validation"
 	@echo "  make warp-parity          Compare 500 Torch steps against upstream MuJoCo-Warp"
 	@echo "  make benchmark-physics    Benchmark single-environment physics throughput"
@@ -81,6 +82,9 @@ coverage:
 
 fetch-golden-policy:
 	$(PYTHON) scripts/fetch_hf_policy.py --policy $(POLICY) --output-dir $(POLICY_DIR)
+
+fetch-all-policies:
+	$(PYTHON) scripts/fetch_hf_policy.py --all --output-dir $(POLICY_DIR)
 
 validate-policy: fetch-golden-policy
 	$(PYTHON) scripts/validate_policy.py --policy-dir $(POLICY_DIR) --policy $(POLICY)
@@ -154,7 +158,6 @@ RENDER_VTHETA ?= 0.0
 RENDER_GIF_FPS ?= $(RENDER_FPS)
 RENDER_GIF_WIDTH ?= 720
 RENDER_GIF_COLORS ?= 48
-RENDER_CONTACTS ?= enabled
 RENDER_MESH_MESH_CONTACTS ?= disabled
 RENDER_SOLVER_ITERATIONS ?= 4
 RENDER_LINE_SEARCH_ITERATIONS ?= 4
@@ -177,7 +180,6 @@ RENDER_ARGS = \
 	--solver-iterations "$(RENDER_SOLVER_ITERATIONS)" \
 	--line-search-iterations "$(RENDER_LINE_SEARCH_ITERATIONS)" \
 	--fixed-iterations \
-	--contacts "$(RENDER_CONTACTS)" \
 	--mesh-mesh-contacts "$(RENDER_MESH_MESH_CONTACTS)"
 
 .PHONY: render-golden
@@ -212,7 +214,7 @@ render-golden-ray: fetch-golden-policy ## Render with the pure mujoco-torch ray 
 		--vx "$(RENDER_VX)" --vy "$(RENDER_VY)" --vtheta "$(RENDER_VTHETA)" \
 		--solver-iterations "$(RENDER_SOLVER_ITERATIONS)" \
 		--line-search-iterations "$(RENDER_LINE_SEARCH_ITERATIONS)" \
-		--fixed-iterations --contacts "$(RENDER_CONTACTS)" \
+		--fixed-iterations \
 		--mesh-mesh-contacts "$(RENDER_MESH_MESH_CONTACTS)" \
 		--ray-chunk-size "$(RENDER_RAY_CHUNK_SIZE)" \
 		--gif "$(RENDER_GIF:.gif=-ray.gif)" \

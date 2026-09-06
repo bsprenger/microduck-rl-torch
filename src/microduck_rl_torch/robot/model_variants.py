@@ -6,22 +6,7 @@ from pathlib import Path
 
 from microduck_rl_torch.envs.scene import EntityCfg, SemanticSelector
 
-SERVO_JOINT_NAMES = (
-    "left_hip_yaw",
-    "left_hip_roll",
-    "left_hip_pitch",
-    "left_knee",
-    "left_ankle",
-    "neck_pitch",
-    "head_pitch",
-    "head_yaw",
-    "head_roll",
-    "right_hip_yaw",
-    "right_hip_roll",
-    "right_hip_pitch",
-    "right_knee",
-    "right_ankle",
-)
+from .constants import SERVO_JOINT_NAMES
 
 
 def _asset_root() -> Path:
@@ -48,11 +33,22 @@ def _entity(
         xml_path=root / robot_xml,
         scene_xml_path=root / scene_xml,
         keyframe_name=keyframe_name,
+        root_body_name="trunk_base",
+        head_body_names=(
+            "neck",
+            "neck_pitch",
+            "yaw_roll_motion",
+            "bottom_head_shell",
+            "jaw_soft",
+            "bearing_roll",
+        ),
         foot_contact_selectors=foot_selectors
         or (
             SemanticSelector(names=("left_foot_collision",)),
             SemanticSelector(names=("right_foot_collision",)),
         ),
+        foot_site_selector=SemanticSelector(names=("left_foot", "right_foot")),
+        collision_name_suffix="_collision",
         actuator_joint_names=SERVO_JOINT_NAMES,
     )
 
@@ -77,6 +73,12 @@ MICRODUCK_STANDUP_ROBOT_CFG = _entity(
     "robot",
     "robot_groundcontact.xml",
     "scene.xml",
+    foot_selectors=_NAMED_FOOT_SELECTORS,
+)
+MICRODUCK_ALLCOLLISIONS_ROBOT_CFG = _entity(
+    "robot",
+    "robot_allcollisions.xml",
+    "scene_apartment.xml",
     foot_selectors=_NAMED_FOOT_SELECTORS,
 )
 MICRODUCK_GROUND_PICK_ROBOT_CFG = _entity(
@@ -113,7 +115,6 @@ MICRODUCK_ROLLERS_BACKLASH_ROBOT_CFG = _entity(
 MICRODUCK_BALL_CFG = EntityCfg(
     name="ball",
     xml_path=_asset_root() / "ball.xml",
-    scene_xml_path=_asset_root() / "scene_ball.xml",
     kind="prop",
     keyframe_name=None,
     root_body_name="ball",

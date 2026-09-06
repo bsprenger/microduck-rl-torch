@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import shutil
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -47,20 +48,93 @@ def _policy_entry(manifest: dict[str, Any], filename: str) -> dict[str, Any]:
     """Find a policy record across the manifest's supported list/dict shapes."""
 
     stem = Path(filename).stem
-    candidates = manifest.get("policies", manifest.get("policy", []))
-    if isinstance(candidates, dict):
-        candidates = [candidates.get(stem, candidates.get(filename, candidates))]
-    if not isinstance(candidates, list):
-        candidates = []
+    candidates = _manifest_candidates(manifest)
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         names = {
-            str(candidate.get(key, "")) for key in ("name", "id", "filename", "file", "policy")
+            str(candidate.get(key, ""))
+            for key in ("name", "id", "filename", "file", "path", "policy")
         }
         if filename in names or stem in names:
             return candidate
     raise ValueError(f"{filename} is not declared in the Hugging Face policy manifest")
+
+
+def _manifest_candidates(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return policy records from the supported manifest list/dict shapes."""
+
+    candidates = manifest.get("policies", manifest.get("policy", []))
+    if isinstance(candidates, list):
+        return [candidate for candidate in candidates if isinstance(candidate, dict)]
+    if not isinstance(candidates, dict):
+        return []
+
+    # The official manifest is a list today, but accepting a mapping makes the
+    # downloader useful for small private repos without adding a registry.
+    result: list[dict[str, Any]] = []
+    for name, value in candidates.items():
+        if isinstance(value, dict):
+            result.append({"name": name, **value})
+        else:
+            result.append({"name": name})
+    return result
+
+
+def _manifest_policy_filenames(manifest: dict[str, Any]) -> list[str]:
+    """Return every ONNX filename declared by a policy manifest."""
+
+    filenames: list[str] = []
+    for entry in _manifest_candidates(manifest):
+        filename = _entry_filename(entry)
+        if filename not in filenames:
+            filenames.append(filename)
+        else:
+            raise ValueError(f"Policy manifest declares {filename} more than once")
+    if not filenames:
+        raise ValueError("Policy manifest does not declare any policies")
+    return filenames
+
+
+def _entry_filename(entry: dict[str, Any]) -> str:
+    """Return the repository filename declared by one manifest entry."""
+
+    # ``file`` is the official manifest field. The other path-like fields are
+    # accepted for small compatible manifests; aliases are only a fallback.
+    for key in ("file", "filename", "path"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            return _policy_filename(value)
+    for key in ("name", "id", "policy"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            return _policy_filename(value)
+    raise ValueError("Policy manifest entry does not declare a policy filename")
+
+
+def _resolve_policy(manifest: dict[str, Any], policy: str) -> tuple[str, dict[str, Any]]:
+    """Resolve a logical policy name to its canonical repository filename."""
+
+    requested = _policy_filename(policy)
+    entry = _policy_entry(manifest, requested)
+    return _entry_filename(entry), entry
+
+
+def resolve_policy_filename(manifest: dict[str, Any], policy: str) -> str:
+    """Resolve a logical policy name to the ONNX filename in a manifest."""
+
+    filename, _ = _resolve_policy(manifest, policy)
+    return filename
+
+
+def _entry_name(entry: dict[str, Any], filename: str) -> str:
+    """Return the stable user-facing key for a manifest policy."""
+
+    for key in ("name", "id", "policy"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            return Path(value).stem
+    return Path(filename).stem
 
 
 def _declared(entry: dict[str, Any], manifest: dict[str, Any], *keys: str) -> Any:
@@ -78,6 +152,14 @@ def _graph_shape(value: onnx.ValueInfoProto) -> list[int | None]:
     for dimension in dimensions:
         result.append(dimension.dim_value if dimension.HasField("dim_value") else None)
     return result
+
+
+def _validate_batched_shape(shape: list[int | None], expected_width: int, *, label: str) -> None:
+    if len(shape) != 2 or shape[-1] != expected_width or shape[0] not in (None, 1):
+        raise ValueError(
+            f"Expected {label} shape [batch, {expected_width}] with dynamic or unit batch, "
+            f"got {shape}"
+        )
 
 
 def validate_policy_artifact(
@@ -114,14 +196,17 @@ def validate_policy_artifact(
 
     model = onnx.load(str(policy_path))
     onnx.checker.check_model(model)
-    if not model.graph.input or not model.graph.output:
-        raise ValueError("ONNX graph has no input or output")
+    if len(model.graph.input) != 1 or len(model.graph.output) != 1:
+        raise ValueError("ONNX graph must have exactly one input and one output")
     input_shape = _graph_shape(model.graph.input[0])
     output_shape = _graph_shape(model.graph.output[0])
-    if not input_shape or input_shape[-1] != EXPECTED_OBS_LEN:
-        raise ValueError(f"Expected ONNX input [..., {EXPECTED_OBS_LEN}], got {input_shape}")
-    if not output_shape or output_shape[-1] != EXPECTED_ACTION_LEN:
-        raise ValueError(f"Expected ONNX output [..., {EXPECTED_ACTION_LEN}], got {output_shape}")
+    _validate_batched_shape(input_shape, EXPECTED_OBS_LEN, label="ONNX input")
+    _validate_batched_shape(output_shape, EXPECTED_ACTION_LEN, label="ONNX output")
+    expected_dtype = onnx.TensorProto.FLOAT
+    for label, value in (("input", model.graph.input[0]), ("output", model.graph.output[0])):
+        dtype = value.type.tensor_type.elem_type
+        if dtype != expected_dtype:
+            raise ValueError(f"Expected ONNX {label} dtype float32, got {dtype}")
     return {
         "filename": filename,
         "robot": robot_name,
@@ -159,6 +244,86 @@ class PolicyArtifact:
         return data
 
 
+def _resolved_revision(api: HfApi, repo_id: str, revision: str | None) -> str:
+    model_info = api.model_info(repo_id=repo_id, revision=revision)
+    resolved_revision = model_info.sha
+    if not resolved_revision:
+        raise RuntimeError(f"Hugging Face did not return a commit revision for {repo_id}")
+    return resolved_revision
+
+
+def _download_manifest(*, repo_id: str, revision: str, cache_dir: Path | None) -> Path:
+    download_kwargs: dict[str, Any] = {"repo_id": repo_id, "revision": revision}
+    if cache_dir is not None:
+        download_kwargs["cache_dir"] = str(cache_dir)
+    return Path(hf_hub_download(filename="manifest.json", **download_kwargs))
+
+
+def _artifact_from_download(
+    filename: str,
+    *,
+    repo_id: str,
+    revision: str,
+    manifest: dict[str, Any],
+    manifest_cache: Path,
+    cache_dir: Path | None,
+    output_dir: Path | None,
+) -> PolicyArtifact:
+    download_kwargs: dict[str, Any] = {"repo_id": repo_id, "revision": revision}
+    if cache_dir is not None:
+        download_kwargs["cache_dir"] = str(cache_dir)
+    policy_cache = Path(hf_hub_download(filename=filename, **download_kwargs))
+
+    destination = output_dir or policy_cache.parent
+    destination.mkdir(parents=True, exist_ok=True)
+    if output_dir is not None:
+        policy_path = destination / filename
+        manifest_path = destination / "manifest.json"
+        shutil.copy2(policy_cache, policy_path)
+        # All policies in a set share this one manifest. Copying it is
+        # idempotent and avoids one artifact.json per policy.
+        shutil.copy2(manifest_cache, manifest_path)
+    else:
+        policy_path = policy_cache
+        manifest_path = manifest_cache
+
+    graph_metadata = validate_policy_artifact(policy_path, manifest_path, filename=filename)
+    expected_sha256 = (
+        OFFICIAL_GOLDEN_SHA256.get(filename) if repo_id == OFFICIAL_POLICY_REPO else None
+    )
+    if expected_sha256 is not None and graph_metadata["sha256"] != expected_sha256:
+        raise ValueError(
+            f"Golden digest drift for {filename}: expected {expected_sha256}, "
+            f"got {graph_metadata['sha256']}"
+        )
+    return PolicyArtifact(
+        repo_id=repo_id,
+        revision=revision,
+        policy_name=filename,
+        policy_path=policy_path,
+        manifest_path=manifest_path,
+        manifest=manifest,
+        sha256=graph_metadata["sha256"],
+        input_name=graph_metadata["input_name"],
+        output_name=graph_metadata["output_name"],
+    )
+
+
+def _write_download_metadata(output_dir: Path, artifacts: Iterable[PolicyArtifact]) -> None:
+    """Write one small set-level provenance record after successful downloads."""
+
+    artifacts = tuple(artifacts)
+    if not artifacts:
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "repo_id": artifacts[0].repo_id,
+        "revision": artifacts[0].revision,
+        "policies": {artifact.policy_name: {"sha256": artifact.sha256} for artifact in artifacts},
+    }
+    (output_dir / "download.json").write_text(json.dumps(metadata, indent=2) + "\n")
+
+
 def fetch_policy(
     policy: str = "alpha_walking",
     *,
@@ -169,52 +334,117 @@ def fetch_policy(
 ) -> PolicyArtifact:
     """Download one official policy at a resolved revision and validate it."""
 
-    filename = _policy_filename(policy)
     api = HfApi()
-    model_info = api.model_info(repo_id=repo_id, revision=revision)
-    resolved_revision = model_info.sha
-    if not resolved_revision:
-        raise RuntimeError(f"Hugging Face did not return a commit revision for {repo_id}")
-    download_kwargs: dict[str, Any] = {"repo_id": repo_id, "revision": resolved_revision}
-    if cache_dir is not None:
-        download_kwargs["cache_dir"] = str(cache_dir)
-    manifest_cache = Path(hf_hub_download(filename="manifest.json", **download_kwargs))
-    policy_cache = Path(hf_hub_download(filename=filename, **download_kwargs))
-
-    destination = output_dir or policy_cache.parent
-    destination.mkdir(parents=True, exist_ok=True)
-    if output_dir is not None:
-        policy_path = destination / filename
-        manifest_path = destination / "manifest.json"
-        shutil.copy2(policy_cache, policy_path)
-        shutil.copy2(manifest_cache, manifest_path)
-    else:
-        policy_path = policy_cache
-        manifest_path = manifest_cache
-    manifest = json.loads(manifest_path.read_text())
-    graph_metadata = validate_policy_artifact(policy_path, manifest_path, filename=filename)
-    expected_sha256 = (
-        OFFICIAL_GOLDEN_SHA256.get(filename) if repo_id == OFFICIAL_POLICY_REPO else None
+    resolved_revision = _resolved_revision(api, repo_id, revision)
+    manifest_cache = _download_manifest(
+        repo_id=repo_id, revision=resolved_revision, cache_dir=cache_dir
     )
-    if expected_sha256 is not None and graph_metadata["sha256"] != expected_sha256:
-        raise ValueError(
-            f"Golden digest drift for {filename}: expected {expected_sha256}, "
-            f"got {graph_metadata['sha256']}"
-        )
-    artifact = PolicyArtifact(
+    manifest = json.loads(manifest_cache.read_text())
+    if not isinstance(manifest, dict):
+        raise ValueError("Policy manifest must contain a JSON object")
+    filename, _ = _resolve_policy(manifest, policy)
+    artifact = _artifact_from_download(
+        filename,
         repo_id=repo_id,
         revision=resolved_revision,
-        policy_name=filename,
+        manifest=manifest,
+        manifest_cache=manifest_cache,
+        cache_dir=cache_dir,
+        output_dir=output_dir,
+    )
+    if output_dir is not None:
+        _write_download_metadata(output_dir, (artifact,))
+    return artifact
+
+
+def fetch_policy_set(
+    policies: str | Iterable[str] | None = None,
+    *,
+    repo_id: str = OFFICIAL_POLICY_REPO,
+    revision: str | None = None,
+    cache_dir: Path | None = None,
+    output_dir: Path | None = None,
+) -> dict[str, PolicyArtifact]:
+    """Download and validate a manifest-selected set of ONNX policies.
+
+    With ``policies=None`` every ONNX policy declared by ``manifest.json`` is
+    fetched. The returned mapping is keyed by the manifest's logical policy
+    name, so callers can explicitly choose and wire a policy into whichever
+    task environment they constructed.
+    """
+
+    api = HfApi()
+    resolved_revision = _resolved_revision(api, repo_id, revision)
+    manifest_cache = _download_manifest(
+        repo_id=repo_id, revision=resolved_revision, cache_dir=cache_dir
+    )
+    manifest = json.loads(manifest_cache.read_text())
+    if not isinstance(manifest, dict):
+        raise ValueError("Policy manifest must contain a JSON object")
+    if policies is None:
+        requested = _manifest_policy_filenames(manifest)
+    elif isinstance(policies, str):
+        requested = [policies]
+    else:
+        requested = list(policies)
+
+    resolved: list[tuple[str, str]] = []
+    seen_filenames: set[str] = set()
+    seen_names: set[str] = set()
+    for policy in requested:
+        filename, entry = _resolve_policy(manifest, policy)
+        if filename in seen_filenames:
+            raise ValueError(f"Policy {filename} was requested more than once")
+        name = _entry_name(entry, filename)
+        if name in seen_names:
+            raise ValueError(f"Policy manifest uses the name {name!r} more than once")
+        seen_filenames.add(filename)
+        seen_names.add(name)
+        resolved.append((filename, name))
+
+    artifacts: dict[str, PolicyArtifact] = {}
+    for filename, name in resolved:
+        artifact = _artifact_from_download(
+            filename,
+            repo_id=repo_id,
+            revision=resolved_revision,
+            manifest=manifest,
+            manifest_cache=manifest_cache,
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+        )
+        artifacts[name] = artifact
+    if output_dir is not None:
+        _write_download_metadata(output_dir, artifacts.values())
+    return artifacts
+
+
+def load_policy(
+    policy_path: Path,
+    manifest_path: Path,
+    *,
+    repo_id: str = OFFICIAL_POLICY_REPO,
+    revision: str = "local-artifact",
+) -> PolicyArtifact:
+    """Validate a policy already present on disk and return its build record."""
+
+    policy_path = Path(policy_path)
+    manifest_path = Path(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    if not isinstance(manifest, dict):
+        raise ValueError("Policy manifest must contain a JSON object")
+    metadata = validate_policy_artifact(policy_path, manifest_path)
+    return PolicyArtifact(
+        repo_id=repo_id,
+        revision=revision,
+        policy_name=policy_path.name,
         policy_path=policy_path,
         manifest_path=manifest_path,
         manifest=manifest,
-        sha256=graph_metadata["sha256"],
-        input_name=graph_metadata["input_name"],
-        output_name=graph_metadata["output_name"],
+        sha256=metadata["sha256"],
+        input_name=metadata["input_name"],
+        output_name=metadata["output_name"],
     )
-    if output_dir is not None:
-        (destination / "artifact.json").write_text(json.dumps(artifact.metadata(), indent=2) + "\n")
-    return artifact
 
 
 class OnnxPolicy:
@@ -260,15 +490,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--revision")
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/hf"))
-    args = parser.parse_args(argv)
-    artifact = fetch_policy(
-        args.policy,
-        repo_id=args.repo_id,
-        revision=args.revision,
-        cache_dir=args.cache_dir,
-        output_dir=args.output_dir,
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Download every ONNX policy declared by the repository manifest",
     )
-    print(json.dumps(artifact.metadata(), indent=2, default=str))
+    args = parser.parse_args(argv)
+    if args.all:
+        artifacts = fetch_policy_set(
+            repo_id=args.repo_id,
+            revision=args.revision,
+            cache_dir=args.cache_dir,
+            output_dir=args.output_dir,
+        )
+        print(
+            json.dumps(
+                {name: artifact.metadata() for name, artifact in artifacts.items()},
+                indent=2,
+                default=str,
+            )
+        )
+    else:
+        artifact = fetch_policy(
+            args.policy,
+            repo_id=args.repo_id,
+            revision=args.revision,
+            cache_dir=args.cache_dir,
+            output_dir=args.output_dir,
+        )
+        print(json.dumps(artifact.metadata(), indent=2, default=str))
     return 0
 
 

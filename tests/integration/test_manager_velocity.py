@@ -12,7 +12,7 @@ from microduck_rl_torch.envs import (
     TermCollection,
 )
 from microduck_rl_torch.envs.managers.events import EventManager
-from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs.model import load_model_bundle
 from microduck_rl_torch.envs.observations import command_vector
 from microduck_rl_torch.envs.rewards import foot_contact_mask
 from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
@@ -20,13 +20,13 @@ from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 @pytest.mark.integration
 def test_manager_environment_is_deterministic_for_fixed_trace():
-    bundle_reference = load_microduck_model(
+    bundle_reference = load_model_bundle(
         fixed_iterations=True,
         solver_iterations=2,
         line_search_iterations=2,
         disable_contacts=True,
     )
-    bundle_manager = load_microduck_model(
+    bundle_manager = load_model_bundle(
         fixed_iterations=True,
         solver_iterations=2,
         line_search_iterations=2,
@@ -64,7 +64,7 @@ def test_manager_environment_is_deterministic_for_fixed_trace():
 
 @pytest.mark.integration
 def test_manager_environment_owns_lifecycle_order(monkeypatch):
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         fixed_iterations=True,
         solver_iterations=2,
         line_search_iterations=2,
@@ -151,7 +151,7 @@ def test_manager_environment_owns_lifecycle_order(monkeypatch):
 
 @pytest.mark.integration
 def test_reset_events_refresh_environment_state_baselines():
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         fixed_iterations=True,
         solver_iterations=2,
         line_search_iterations=2,
@@ -194,12 +194,12 @@ def test_semantic_model_selectors_support_roller_and_backlash_assets():
         MICRODUCK_WALK_ROLLERS_ROBOT_CFG,
     )
 
-    roller = load_microduck_model(
+    roller = load_model_bundle(
         entity_cfg=MICRODUCK_WALK_ROLLERS_ROBOT_CFG,
         actuator_mode="xml",
         disable_contacts=True,
     )
-    backlash = load_microduck_model(
+    backlash = load_model_bundle(
         entity_cfg=MICRODUCK_WALK_BACKLASH_ROBOT_CFG,
         actuator_mode="xml",
         disable_contacts=True,
@@ -229,7 +229,7 @@ def test_multi_entity_bundle_exposes_prop_views_from_compiled_scene():
 
     from microduck_rl_torch.robot import MICRODUCK_BALL_CFG, MICRODUCK_STANDUP_ROBOT_CFG
 
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         Path("assets/robot/microduck/scene_ball.xml"),
         entity_cfg=MICRODUCK_STANDUP_ROBOT_CFG,
         entities={

@@ -266,9 +266,10 @@ make render-golden-10s
 
 `RENDER_SECONDS` is converted using the model timestep and decimation, so it remains correct if
 those values change. `RENDER_STEPS` remains available for exact step-count experiments.
-Rendering defaults to contacts with the floor enabled and detailed mesh-to-mesh contacts disabled;
-the latter can make a fallen CAD model spend an unbounded amount of time in the convex SAT solver.
-Use `RENDER_MESH_MESH_CONTACTS=enabled` when that self-contact path is specifically under test.
+Rendering always enables floor contacts. Detailed mesh-to-mesh contacts are disabled by default;
+that self-contact path can make a fallen CAD model spend an unbounded amount of time in the
+convex SAT solver. Use `RENDER_MESH_MESH_CONTACTS=enabled` when that path is specifically under
+test.
 
 To exercise the pure Torch ray renderer instead, run:
 
@@ -281,17 +282,44 @@ detailed CAD meshes; ray processing is chunked to avoid an all-pixels/all-triang
 The native renderer is launched through the macOS `mjpython` compatibility wrapper. `ffmpeg` must
 be installed and available on `PATH` for either video or GIF output.
 
+Rendering is also available directly on the environment for applications that need to own their
+rollout loop:
+
+```python
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
+from microduck_rl_torch.rendering import CameraConfig, RenderConfig
+
+env = ManagerBasedTaskEnv(
+    cfg,
+    render_mode="rgb_array",
+    render_config=RenderConfig(
+        backend="mujoco",
+        camera=CameraConfig(track_body="trunk_base"),
+    ),
+)
+try:
+    env.reset()
+    frame = env.render()  # uint8 (height, width, 3)
+finally:
+    env.close()
+```
+
+The environment owns renderer creation and cleanup. `render_policy_rollout` is the standard
+post-step recording adapter; it does not define alternate dynamics or observations. The native
+backend mirrors the Torch state into a scratch native `MjData` for full-CAD rasterization, while
+the `mujoco-torch` backend provides a named-camera pure-Torch ray-rendering path.
+
 For a direct CPU environment smoke test:
 
 ```python
 import torch
 
 from microduck_rl_torch.envs import ManagerBasedTaskEnv
-from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs.model import load_model_bundle
 from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 cfg = make_microduck_velocity_env_cfg()
-bundle = load_microduck_model(
+bundle = load_model_bundle(
     entity_cfg=cfg.scene.entities["robot"],
     device="cpu",
     disable_contacts=True,

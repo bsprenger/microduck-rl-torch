@@ -11,7 +11,7 @@ import numpy as np
 from microduck_rl_torch.envs.actuation import BamM6Parameters, friction_budget, motor_torque
 from microduck_rl_torch.envs.model import (
     SERVO_JOINT_NAMES,
-    MicroDuckModelBundle,
+    ModelBundle,
     default_scene_path,
 )
 
@@ -37,7 +37,7 @@ class NativeMicroDuckEnv:
         self,
         xml_path: Path | None = None,
         *,
-        bundle: MicroDuckModelBundle | None = None,
+        bundle: ModelBundle | None = None,
         timestep: float = 0.005,
         decimation: int = 4,
         solver_iterations: int | None = None,

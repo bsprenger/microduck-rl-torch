@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from microduck_rl_torch.envs.model import default_scene_path, load_microduck_model
+from microduck_rl_torch.envs.model import default_scene_path, load_model_bundle
 from microduck_rl_torch_verification.trajectory import (
     generate_action_tape,
     generate_native_trajectory,
@@ -38,7 +38,7 @@ def main() -> int:
     )
     parser.add_argument("--action-delay-lag", type=int, default=0)
     args = parser.parse_args()
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         args.xml,
         fixed_iterations=True,
         solver_iterations=args.solver_iterations,

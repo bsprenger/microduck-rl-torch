@@ -81,28 +81,42 @@ class EventManager:
             if term.enabled and self._active(term, env) and self._mode(term) == "startup":
                 self._apply_term(env, name, term, env_ids=None)
 
-    def reset(self, env: Any) -> None:
+    def reset(self, env: Any, env_ids: torch.Tensor | slice | None = None) -> None:
         """Apply reset events and initialize interval schedules."""
 
-        next_steps: dict[str, int] = {}
+        num_envs = getattr(env, "num_envs", 1)
+        if env_ids is None:
+            env_ids = torch.arange(num_envs, device=self._device(env))
+        next_steps: dict[str, Any] = {}
         for name, term in self.terms.items():
             if not term.enabled or not self._active(term, env):
                 continue
             mode = self._mode(term)
             if mode == "reset":
-                env_ids = torch.zeros(1, dtype=torch.long, device=self._device(env))
                 self._apply_term(env, name, term, env_ids=env_ids)
             elif mode == "interval":
                 interval = self._interval(term)
                 if interval is None:
                     raise ValueError(f"Interval event {name!r} needs interval_range_s")
-                next_steps[name] = env.step_count + env._next_interval_step(interval)
+                sampled = self._next_interval_steps(env, interval, env_ids=env_ids)
+                if num_envs == 1:
+                    next_steps[name] = sampled
+                else:
+                    prior = env.state.manager_data.get("event_next_steps", {}).get(name)
+                    if isinstance(prior, torch.Tensor) and prior.shape == (num_envs,):
+                        schedule = prior.clone()
+                        ids = self._ids(env_ids, num_envs)
+                        schedule[ids] = sampled
+                        next_steps[name] = schedule
+                    else:
+                        next_steps[name] = sampled
         if env.state is None:
             raise RuntimeError("Environment state must exist before resetting events")
         env.state.manager_data["event_next_steps"] = next_steps
 
     def apply(self, env: Any, stage: EventStage) -> None:
         next_steps = env.state.manager_data.setdefault("event_next_steps", {})
+        num_envs = getattr(env, "num_envs", 1)
         for name, term in self.terms.items():
             if not term.enabled or not self._active(term, env):
                 continue
@@ -117,11 +131,64 @@ class EventManager:
                 if mode == "interval":
                     if name not in next_steps:
                         raise RuntimeError(f"Interval event {name!r} was not initialized")
-                    if env.step_count >= next_steps[name]:
-                        self._apply_term(env, name, term, env_ids=None)
+                    schedule = next_steps[name]
+                    if isinstance(schedule, torch.Tensor):
+                        step_counts = getattr(
+                            env,
+                            "step_counts",
+                            torch.tensor(
+                                [env.step_count], dtype=torch.long, device=schedule.device
+                            ),
+                        )
+                        due = schedule <= step_counts
+                        if not bool(due.any()):
+                            continue
+                        env_ids = due.nonzero(as_tuple=False).flatten()
+                    elif env.step_count < schedule:
+                        continue
+                    else:
+                        env_ids = None
+                    if env_ids is not None or num_envs == 1:
+                        self._apply_term(env, name, term, env_ids=env_ids)
                         interval = self._interval(term)
                         if interval is None:
                             raise ValueError(f"Interval event {name!r} needs interval_range_s")
-                        next_steps[name] = env.step_count + env._next_interval_step(interval)
+                        if isinstance(schedule, torch.Tensor):
+                            schedule = schedule.clone()
+                            schedule[env_ids] = self._next_interval_steps(
+                                env, interval, env_ids=env_ids
+                            )
+                            next_steps[name] = schedule
+                        else:
+                            next_steps[name] = self._next_interval_steps(env, interval)
             elif stage == "post_physics" and mode == "post_physics":
                 self._apply_term(env, name, term, env_ids=None)
+
+    def _next_interval_steps(
+        self,
+        env: Any,
+        interval: tuple[float, float],
+        *,
+        env_ids: torch.Tensor | slice | None = None,
+    ) -> Any:
+        if not hasattr(env, "_sample_range"):
+            return int(env._next_interval_step(interval)) + int(getattr(env, "step_count", 0))
+        sampled = env._sample_range(*interval, env_ids=env_ids)
+        steps = (
+            torch.round(
+                torch.as_tensor(sampled, device=env.bundle.device)
+                / (env.bundle.timestep * env.decimation)
+            )
+            .clamp_min(1)
+            .to(torch.long)
+        )
+        num_envs = getattr(env, "num_envs", 1)
+        if num_envs == 1:
+            return int(steps.item()) + int(env.step_counts[0].item())
+        return steps + (env.step_counts if env_ids is None else env.step_counts[env_ids])
+
+    @staticmethod
+    def _ids(env_ids: torch.Tensor | slice, num_envs: int) -> torch.Tensor:
+        if isinstance(env_ids, slice):
+            return torch.arange(num_envs)[env_ids]
+        return torch.as_tensor(env_ids, dtype=torch.long).reshape(-1)

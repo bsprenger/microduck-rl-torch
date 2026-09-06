@@ -7,7 +7,10 @@ import argparse
 import json
 from pathlib import Path
 
-from microduck_rl_torch.policies.huggingface import validate_policy_artifact
+from microduck_rl_torch.policies.huggingface import (
+    resolve_policy_filename,
+    validate_policy_artifact,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -15,10 +18,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy-dir", type=Path, default=Path("artifacts/hf"))
     parser.add_argument("--policy", default="alpha_walking")
     args = parser.parse_args(argv)
-    filename = args.policy if args.policy.endswith(".onnx") else f"{args.policy}.onnx"
+    manifest_path = args.policy_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    filename = resolve_policy_filename(manifest, args.policy)
     metadata = validate_policy_artifact(
         args.policy_dir / filename,
-        args.policy_dir / "manifest.json",
+        manifest_path,
         filename=filename,
     )
     print(json.dumps(metadata, indent=2))

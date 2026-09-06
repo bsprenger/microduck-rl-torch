@@ -2,13 +2,13 @@ import pytest
 import torch
 
 from microduck_rl_torch.envs import ManagerBasedTaskEnv
-from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs.model import load_model_bundle
 from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 
 @pytest.mark.integration
 def test_reset_randomization_is_bounded_and_non_accumulating():
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         fixed_iterations=True,
         solver_iterations=2,
         line_search_iterations=2,
@@ -50,8 +50,7 @@ def test_reset_randomization_is_bounded_and_non_accumulating():
     drop_gain = environment.physics._bam_drop_gain
     assert vin is not None
     assert isinstance(drop_gain, torch.Tensor)
-    assert torch.equal(vin, first_vin)
-    assert torch.equal(drop_gain, first_drop_gain)
+    assert not (torch.equal(vin, first_vin) and torch.equal(drop_gain, first_drop_gain))
 
     randomization = environment.config.randomization
     assert torch.all(torch.abs(trunk_delta) <= randomization.com_range)
@@ -64,7 +63,7 @@ def test_reset_randomization_is_bounded_and_non_accumulating():
 
 @pytest.mark.integration
 def test_disabling_randomization_clears_previous_actuator_randomization():
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         fixed_iterations=True,
         solver_iterations=2,
         line_search_iterations=2,

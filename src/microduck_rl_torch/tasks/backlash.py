@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from microduck_rl_torch.envs.observations import (
+    joint_position_rel_backlash,
+    joint_velocity_rel_backlash,
+)
 from microduck_rl_torch.envs.scene import EntityCfg
 from microduck_rl_torch.envs.task_config import TaskEnvCfg
 from microduck_rl_torch.robot import (
@@ -25,6 +29,16 @@ def make_backlash_variant(cfg: TaskEnvCfg, robot_cfg: EntityCfg) -> TaskEnvCfg:
     result.scene.entities["robot"] = robot_cfg
     result.scene.scene_xml = robot_cfg.load_path
     result.actions.actuator_mode = "bam"
+    for group_name in ("actor", "critic"):
+        group = result.observations.groups.get(group_name)
+        if group is None:
+            continue
+        position = group.terms.get("joint_position")
+        if position is not None:
+            position.func = joint_position_rel_backlash
+        velocity = group.terms.get("joint_velocity")
+        if velocity is not None:
+            velocity.func = joint_velocity_rel_backlash
     result.metadata.update(
         {
             "family": f"{result.metadata.get('family', 'microduck')}_backlash",

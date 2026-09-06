@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from microduck_rl_torch.envs import ManagerBasedTaskEnv
-from microduck_rl_torch.envs.model import MicroDuckModelBundle
+from microduck_rl_torch.envs.model import ModelBundle
 from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
 from .native import NativeMicroDuckEnv
@@ -83,7 +83,7 @@ def _native_termination(env: NativeMicroDuckEnv) -> tuple[bool, bool]:
 
 
 def generate_native_trajectory(
-    bundle: MicroDuckModelBundle,
+    bundle: ModelBundle,
     actions: np.ndarray,
     *,
     command: np.ndarray,
@@ -174,7 +174,7 @@ def generate_action_tape(steps: int, *, seed: int = 20260903) -> np.ndarray:
 
 
 def rollout_torch(
-    bundle: MicroDuckModelBundle,
+    bundle: ModelBundle,
     trajectory: GoldenTrajectory,
     *,
     command: torch.Tensor,

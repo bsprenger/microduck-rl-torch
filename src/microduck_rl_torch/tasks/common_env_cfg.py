@@ -23,7 +23,7 @@ from microduck_rl_torch.envs.observations import (
     projected_gravity,
 )
 from microduck_rl_torch.envs.rewards import velocity_term
-from microduck_rl_torch.envs.scene import SceneCfg, SensorCfg, TerrainCfg
+from microduck_rl_torch.envs.scene import SceneCfg, SemanticSelector, SensorCfg, TerrainCfg
 from microduck_rl_torch.envs.task_config import (
     ActionCfg,
     EventTermCfg,
@@ -177,6 +177,20 @@ def make_velocity_env_cfg(*, play: bool = False) -> TaskEnvCfg:
             sensors={
                 "imu_ang_vel": SensorCfg("imu_ang_vel", expected_dim=3),
                 "imu_accel": SensorCfg("imu_accel", expected_dim=3),
+                "left_foot_contact": SensorCfg(
+                    "left_foot_contact",
+                    kind="contact",
+                    primary=SemanticSelector(names=("left_foot_collision",)),
+                    secondary=SemanticSelector(mode="regex", pattern=r"^(floor|terrain.*)$"),
+                    expected_dim=1,
+                ),
+                "right_foot_contact": SensorCfg(
+                    "right_foot_contact",
+                    kind="contact",
+                    primary=SemanticSelector(names=("right_foot_collision",)),
+                    secondary=SemanticSelector(mode="regex", pattern=r"^(floor|terrain.*)$"),
+                    expected_dim=1,
+                ),
             },
             scene_xml=robot.load_path,
         ),
@@ -256,5 +270,8 @@ def make_velocity_env_cfg(*, play: bool = False) -> TaskEnvCfg:
             "family": "velocity",
             "rl_cfg": MicroduckRlCfg(),
             "domain_randomization": False,
+            # Velocity histories are a task component; ManagerBasedTaskEnv
+            # remains usable for tasks with no feet, IMU, or commands.
+            "velocity_state": True,
         },
     )

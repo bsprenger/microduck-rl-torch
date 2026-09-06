@@ -11,14 +11,15 @@ import numpy as np
 import torch
 
 from microduck_rl_torch.envs import ManagerBasedTaskEnv, default_scene_path
-from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs.model import load_model_bundle
 from microduck_rl_torch.envs.observations import command_vector
 from microduck_rl_torch.policies.huggingface import (
     OFFICIAL_POLICY_REPO,
     OnnxPolicy,
     PolicyArtifact,
     fetch_policy,
-    validate_policy_artifact,
+    load_policy,
+    resolve_policy_filename,
 )
 from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 
@@ -26,9 +27,12 @@ from .native import NativeMicroDuckEnv
 
 
 def _local_artifact(policy_dir: Path, policy: str) -> tuple[Path, Path]:
-    filename = policy if policy.endswith(".onnx") else f"{policy}.onnx"
-    policy_path = policy_dir / filename
     manifest_path = policy_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Expected {manifest_path}; run make fetch-golden-policy first")
+    manifest = json.loads(manifest_path.read_text())
+    filename = resolve_policy_filename(manifest, policy)
+    policy_path = policy_dir / filename
     if not policy_path.is_file() or not manifest_path.is_file():
         raise FileNotFoundError(
             f"Expected {policy_path} and {manifest_path}; run make fetch-golden-policy first"
@@ -38,21 +42,32 @@ def _local_artifact(policy_dir: Path, policy: str) -> tuple[Path, Path]:
 
 def _artifact_from_local(policy_dir: Path, policy: str) -> PolicyArtifact:
     policy_path, manifest_path = _local_artifact(policy_dir, policy)
-    metadata = validate_policy_artifact(policy_path, manifest_path)
-    manifest = json.loads(manifest_path.read_text())
-    provenance_path = policy_dir / "artifact.json"
+    provenance_path = policy_dir / "download.json"
+    if not provenance_path.is_file():
+        # Read the old sidecar format for artifacts produced before policy-set
+        # downloads were introduced.
+        provenance_path = policy_dir / "artifact.json"
     provenance = json.loads(provenance_path.read_text()) if provenance_path.is_file() else {}
-    return PolicyArtifact(
+    artifact = load_policy(
+        policy_path,
+        manifest_path,
         repo_id=provenance.get("repo_id", OFFICIAL_POLICY_REPO),
         revision=provenance.get("revision", "local-artifact"),
-        policy_name=policy_path.name,
-        policy_path=policy_path,
-        manifest_path=manifest_path,
-        manifest=manifest,
-        sha256=metadata["sha256"],
-        input_name=metadata["input_name"],
-        output_name=metadata["output_name"],
     )
+    policy_records = provenance.get("policies")
+    if isinstance(policy_records, dict):
+        if policy_path.name not in policy_records:
+            raise ValueError(
+                f"Policy {policy_path.name} is not part of the downloaded set in {provenance_path}"
+            )
+        record = policy_records[policy_path.name]
+        expected_sha256 = record.get("sha256") if isinstance(record, dict) else None
+        if expected_sha256 and expected_sha256 != artifact.sha256:
+            raise ValueError(
+                f"Policy digest does not match {provenance_path}: "
+                f"expected {expected_sha256}, got {artifact.sha256}"
+            )
+    return artifact
 
 
 def _max_abs(left: Any, right: Any) -> float:
@@ -73,8 +88,14 @@ def validate(
 ) -> dict[str, Any]:
     if steps < 1:
         raise ValueError("steps must be positive")
+    if artifact.policy_name != "alpha_walking.onnx":
+        raise ValueError(
+            "This validation entry point constructs the velocity task and only supports "
+            "alpha_walking.onnx; construct the matching task environment and wire "
+            "OnnxPolicy explicitly for other policies"
+        )
     task_cfg = make_microduck_velocity_env_cfg()
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         xml_path,
         entity_cfg=task_cfg.scene.entities["robot"],
         device=device,

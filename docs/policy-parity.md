@@ -7,9 +7,42 @@ The initial golden artifact is `alpha_walking.onnx` from the official public mod
 - deployment frequency: 50 Hz
 - model format: ONNX
 
-The repository manifest is fetched at the same resolved revision as the policy. The fetcher checks
+The repository manifest is fetched at the same resolved revision as each policy. The fetcher checks
 the model API dimensions, robot identifier, control frequency, ONNX graph dimensions, and SHA-256
-digest. It then writes a small local artifact metadata file alongside the policy.
+digest. `fetch_policy_set()` and `microduck-fetch-policy --all` can fetch every ONNX file declared
+by the manifest into one output directory. The returned `PolicyArtifact` records provide
+construction-time provenance; the output directory also gets one small `download.json` record so
+reloading a downloaded set retains its Hub revision and per-file digest. They do not configure or
+construct an environment. `fetch_policy("sitstand")`-style logical names are resolved through the
+manifest to the canonical ONNX filename.
+
+Policies are intentionally composable with task environments. Construct the task environment as
+usual, download or load the policy explicitly, then connect its observation and action tensors in
+the rollout script:
+
+```python
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
+from microduck_rl_torch.policies import OnnxPolicy, fetch_policy
+from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
+
+artifact = fetch_policy("alpha_walking")
+policy = OnnxPolicy(artifact)
+env = ManagerBasedTaskEnv(make_microduck_velocity_env_cfg())
+
+observation = env.reset()
+for _ in range(250):
+    transition = env.step(policy(observation))
+    observation = transition.observation
+    if transition.terminated or transition.truncated:
+        break
+```
+
+The loader validates the low-level deployment contract (robot, observation width, action width,
+control rate, and ONNX graph). Task semantics, observation ordering, action scaling, commands, and
+phase/state behavior remain owned by the task configuration. The loader does not select a task or
+silently alter an environment. The existing `microduck-validate` and rendering helpers are
+explicitly velocity/`alpha_walking` checks; they reject other policies until their corresponding
+task configurations are constructed and passed through the same manual wiring pattern.
 
 This is intentionally a deployment-level golden policy rather than a raw trainer checkpoint. The
 upstream Hugging Face Jobs flow uploads `logs/rsl_rl/**/model_*.pt` snapshots to private model

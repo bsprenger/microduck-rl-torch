@@ -7,6 +7,8 @@ from typing import Any
 
 import torch
 
+from ..dispatch import construct
+
 
 def resolve_term(term: Any, env: Any) -> Any:
     """Resolve a function or upstream-style stateful term instance.
@@ -21,13 +23,7 @@ def resolve_term(term: Any, env: Any) -> Any:
     if func is None:
         return None
     if inspect.isclass(func):
-        try:
-            return func(cfg=term, env=env)
-        except TypeError as keyword_error:
-            try:
-                return func(term, env)
-            except TypeError:
-                raise keyword_error from None
+        return construct(func, term, env)
     return func
 
 

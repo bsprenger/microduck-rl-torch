@@ -5,16 +5,23 @@ import pytest
 import torch
 
 from microduck_rl_torch.envs import ManagerBasedTaskEnv
-from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs.model import load_model_bundle
+from microduck_rl_torch.robot import MICRODUCK_WALK_BACKLASH_ROBOT_CFG
 from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
+from microduck_rl_torch.tasks.backlash import make_backlash_variant
 from microduck_rl_torch_verification.native import NativeMicroDuckEnv
 
 
 @pytest.mark.integration
 def test_backlash_encoder_and_bam_control_match_native():
     scene = Path(__file__).parents[2] / "assets/robot/microduck/scene_walk_backlash.xml"
-    bundle = load_microduck_model(
+    cfg = make_backlash_variant(
+        make_microduck_velocity_env_cfg(), MICRODUCK_WALK_BACKLASH_ROBOT_CFG
+    )
+    bundle = load_model_bundle(
         scene,
+        entity_cfg=MICRODUCK_WALK_BACKLASH_ROBOT_CFG,
+        entities=cfg.scene.entities,
         dtype=torch.float64,
         fixed_iterations=True,
         solver_iterations=30,
@@ -26,7 +33,7 @@ def test_backlash_encoder_and_bam_control_match_native():
     # manager default now samples configured commands even with DR disabled,
     # matching upstream command-manager semantics, so pin this parity fixture.
     torch_env = ManagerBasedTaskEnv(
-        make_microduck_velocity_env_cfg(),
+        cfg,
         bundle=bundle,
         command=torch.zeros(13, dtype=bundle.dtype),
     )

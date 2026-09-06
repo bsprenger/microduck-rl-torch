@@ -52,7 +52,26 @@ class ObservationManager:
                 dtype=env.bundle.dtype,
                 device=env.bundle.device,
             )
-            if value.ndim == 0:
+            if getattr(env, "num_envs", 1) > 1:
+                # Every batched observation term has the canonical shape
+                # ``(num_envs, features)``.  This accepts scalar constants,
+                # one shared feature vector, and already-batched terms from
+                # custom task code without making the manager inspect the
+                # term's implementation.
+                num_envs = env.num_envs
+                if value.ndim == 0:
+                    value = value.expand(num_envs).unsqueeze(-1)
+                elif value.ndim == 1:
+                    if value.shape[0] == num_envs:
+                        value = value.unsqueeze(-1)
+                    else:
+                        value = value.unsqueeze(0).expand(num_envs, -1)
+                elif value.ndim != 2 or value.shape[0] != num_envs:
+                    raise ValueError(
+                        f"Observation term {name!r} returned {tuple(value.shape)}; "
+                        f"expected a vector or ({num_envs}, features)"
+                    )
+            elif value.ndim == 0:
                 value = value.reshape(1)
             value = value * term.scale
             if term.noise is not None:

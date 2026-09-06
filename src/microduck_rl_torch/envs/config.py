@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable, MutableMapping
+from collections.abc import Callable, MutableMapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -106,10 +106,36 @@ class DomainRandomizationConfig:
     foot_friction_range: tuple[float, float] = (0.7, 1.3)
     velocity_push_interval: tuple[float, float] = (3.0, 6.0)
     velocity_push_range: tuple[float, float] = (-0.3, 0.3)
+    # BAM electrical parameters are task configuration, not backend
+    # constants.  Keeping them here lets future actuator variants reuse the
+    # same lifecycle while changing only their randomization policy.
+    vin_range: tuple[float, float] = (6.5, 8.2)
+    vin_drop_gain_range: tuple[float, float] = (0.0, 0.2)
     imu_angle_degrees: float = 6.0
     encoder_bias_range: tuple[float, float] = (-0.015, 0.015)
     base_pitch_degrees: float = 10.0
     base_roll_degrees: float = 5.0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "mass_inertia_range",
+            "joint_friction_range",
+            "armature_range",
+            "foot_friction_range",
+            "velocity_push_interval",
+            "velocity_push_range",
+            "vin_range",
+            "vin_drop_gain_range",
+            "encoder_bias_range",
+        ):
+            value = getattr(self, name)
+            if len(value) != 2 or float(value[0]) > float(value[1]):
+                raise ValueError(f"{name} must be a two-value ascending range")
+        if any(
+            float(value) < 0
+            for value in (self.imu_angle_degrees, self.base_pitch_degrees, self.base_roll_degrees)
+        ):
+            raise ValueError("Orientation randomization degrees must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -167,19 +193,55 @@ class MicroDuckVelocityConfig:
     randomize_actuator_delay: bool = False
 
 
+def _random_batch(
+    shape: tuple[int, ...],
+    *,
+    generator: torch.Generator | Sequence[torch.Generator] | None,
+    device: torch.device,
+    dtype: torch.dtype,
+    batch_size: int,
+) -> torch.Tensor:
+    """Draw independent rows when a batched backend supplies per-env streams."""
+
+    if not isinstance(generator, Sequence):
+        return torch.rand(shape, generator=generator, device=device, dtype=dtype)
+    if len(generator) != batch_size:
+        raise ValueError("A batched random draw needs one generator per environment")
+    if batch_size == 1:
+        return torch.rand(shape, generator=generator[0], device=device, dtype=dtype)
+    row_shape = shape[1:] if shape and shape[0] == batch_size else shape
+    return torch.stack(
+        [
+            torch.rand(row_shape, generator=stream, device=device, dtype=dtype)
+            for stream in generator
+        ]
+    )
+
+
 def sample_uniform(
     ranges: tuple[tuple[float, float], ...],
     *,
-    generator: torch.Generator | None = None,
+    generator: torch.Generator | Sequence[torch.Generator] | None = None,
     device: torch.device,
     dtype: torch.dtype,
+    batch_size: int = 1,
 ) -> torch.Tensor:
-    """Sample one vector without changing the caller's RNG state policy."""
+    """Sample one vector or a batch of vectors without hidden global RNG."""
 
-    values = torch.empty(len(ranges), device=device, dtype=dtype)
+    shape = (len(ranges),) if batch_size == 1 else (batch_size, len(ranges))
+    values = torch.empty(shape, device=device, dtype=dtype)
     for index, (low, high) in enumerate(ranges):
-        values[index] = (
-            torch.rand((), generator=generator, device=device, dtype=dtype) * (high - low) + low
+        random_shape = () if batch_size == 1 else (batch_size,)
+        values[..., index] = (
+            _random_batch(
+                random_shape,
+                generator=generator,
+                device=device,
+                dtype=dtype,
+                batch_size=batch_size,
+            )
+            * (high - low)
+            + low
         )
     return values
 
@@ -187,12 +249,13 @@ def sample_uniform(
 def sample_twist(
     config: CommandConfig | None,
     *,
-    generator: torch.Generator | None,
+    generator: torch.Generator | Sequence[torch.Generator] | None,
     device: torch.device,
     dtype: torch.dtype,
     twist_ranges: tuple[tuple[float, float], ...] | None = None,
     turn_in_place_fraction: float | None = None,
     standing_fraction: float | None = None,
+    batch_size: int = 1,
 ) -> torch.Tensor:
     """Sample only the 3D velocity command used by twist resampling."""
 
@@ -213,22 +276,59 @@ def sample_twist(
         if standing_fraction is None and config is not None
         else (standing_fraction or 0.0)
     )
-    twist = sample_uniform(ranges, generator=generator, device=device, dtype=dtype)
-    standing = (
-        torch.rand((), generator=generator, device=device, dtype=dtype) < standing_fraction_value
+    twist = sample_uniform(
+        ranges, generator=generator, device=device, dtype=dtype, batch_size=batch_size
     )
-    if standing:
-        twist[:] = 0.0
-    turn_in_place = torch.rand((), generator=generator, device=device, dtype=dtype) < turn_fraction
-    if turn_in_place:
-        twist[:2] = 0.0
+    random_shape = () if batch_size == 1 else (batch_size,)
+    standing = (
+        _random_batch(
+            random_shape,
+            generator=generator,
+            device=device,
+            dtype=dtype,
+            batch_size=batch_size,
+        )
+        < standing_fraction_value
+    )
+    twist = torch.where(standing[..., None], torch.zeros_like(twist), twist)
+    turn_in_place = (
+        _random_batch(
+            random_shape,
+            generator=generator,
+            device=device,
+            dtype=dtype,
+            batch_size=batch_size,
+        )
+        < turn_fraction
+    )
+    twist[..., :2] = torch.where(
+        turn_in_place[..., None], torch.zeros_like(twist[..., :2]), twist[..., :2]
+    )
+    if bool(turn_in_place.any()):
         lo, hi = ranges[2]
         max_rate = max(abs(lo), abs(hi))
         magnitude = (
-            torch.rand((), generator=generator, device=device, dtype=dtype) * (max_rate * 0.6)
+            _random_batch(
+                random_shape,
+                generator=generator,
+                device=device,
+                dtype=dtype,
+                batch_size=batch_size,
+            )
+            * (max_rate * 0.6)
             + max_rate * 0.4
         )
-        twist[2] = torch.where(
-            torch.rand((), generator=generator, device=device) < 0.5, -magnitude, magnitude
+        sign = torch.where(
+            _random_batch(
+                random_shape,
+                generator=generator,
+                device=device,
+                dtype=dtype,
+                batch_size=batch_size,
+            )
+            < 0.5,
+            -magnitude,
+            magnitude,
         )
+        twist[..., 2] = torch.where(turn_in_place, sign, twist[..., 2])
     return twist

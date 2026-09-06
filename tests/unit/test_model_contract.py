@@ -1,11 +1,11 @@
 import pytest
 
-from microduck_rl_torch.envs.model import SERVO_JOINT_NAMES, load_microduck_model
+from microduck_rl_torch.envs.model import SERVO_JOINT_NAMES, load_model_bundle
 
 
 @pytest.mark.integration
 def test_microduck_model_contract():
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         fixed_iterations=True,
         solver_iterations=2,
         line_search_iterations=2,

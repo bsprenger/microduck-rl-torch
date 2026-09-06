@@ -5,24 +5,29 @@ import pytest
 import torch
 
 from microduck_rl_torch.envs import ManagerBasedTaskEnv
-from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs.model import load_model_bundle
+from microduck_rl_torch.robot import MICRODUCK_WALK_BACKLASH_ROBOT_CFG
 from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
+from microduck_rl_torch.tasks.backlash import make_backlash_variant
 
 
 @pytest.mark.integration
 def test_head_pose_reward_uses_home_relative_command_and_backlash_output():
     scene = Path("assets/robot/microduck/scene_walk_backlash.xml")
-    bundle = load_microduck_model(
+    cfg = make_backlash_variant(
+        make_microduck_velocity_env_cfg(), MICRODUCK_WALK_BACKLASH_ROBOT_CFG
+    )
+    bundle = load_model_bundle(
         scene,
+        entity_cfg=MICRODUCK_WALK_BACKLASH_ROBOT_CFG,
+        entities=cfg.scene.entities,
         fixed_iterations=True,
         solver_iterations=30,
         line_search_iterations=30,
         disable_contacts=True,
     )
     command = torch.zeros(13, dtype=bundle.dtype)
-    environment = ManagerBasedTaskEnv(
-        make_microduck_velocity_env_cfg(), bundle=bundle, command=command
-    )
+    environment = ManagerBasedTaskEnv(cfg, bundle=bundle, command=command)
     environment.reset()
     result = environment.step(torch.zeros(bundle.action_size, dtype=bundle.dtype))
     assert environment.data is not None

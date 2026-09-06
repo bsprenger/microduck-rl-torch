@@ -46,6 +46,14 @@ class RewardManager:
                 dtype=env.bundle.dtype,
                 device=env.bundle.device,
             )
+            num_envs = getattr(env, "num_envs", 1)
+            if raw[name].ndim == 0 and num_envs > 1:
+                raw[name] = raw[name].expand(num_envs)
+            if raw[name].shape != (() if num_envs == 1 else (num_envs,)):
+                raise ValueError(
+                    f"Reward term {name!r} returned {tuple(raw[name].shape)}; "
+                    f"expected {'scalar' if num_envs == 1 else f'({num_envs},)'}"
+                )
         missing = [
             name
             for name, term in self.terms.items()
@@ -61,7 +69,7 @@ class RewardManager:
         if not weighted:
             reward = torch.zeros((), dtype=env.bundle.dtype, device=env.bundle.device)
         else:
-            reward = torch.stack([value.reshape(()) for value in weighted]).sum()
+            reward = torch.stack(weighted, dim=0).sum(dim=0)
         if self.scale_by_dt:
             reward = reward * (env.bundle.timestep * env.decimation)
         return reward.to(dtype=torch.float32), raw

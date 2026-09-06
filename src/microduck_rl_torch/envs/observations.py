@@ -25,8 +25,14 @@ def base_ang_vel(env: Any, *, misaligned: bool = True) -> torch.Tensor:
     """Return the delayed IMU angular-velocity observation term."""
 
     sensor = _sensor_state(env)
-    index = max(0, len(sensor.imu_ang_vel_history) - 1 - sensor.imu_lag)
-    value = sensor.imu_ang_vel_history[index]
+    lag = sensor.imu_lag
+    if isinstance(lag, torch.Tensor) and lag.ndim > 0:
+        values = torch.stack(sensor.imu_ang_vel_history, dim=1)
+        indices = (values.shape[1] - 1 - lag).clamp_min(0)
+        value = values[torch.arange(env.num_envs, device=values.device), indices]
+    else:
+        index = max(0, len(sensor.imu_ang_vel_history) - 1 - int(lag))
+        value = sensor.imu_ang_vel_history[index]
     return _quat_apply(sensor.imu_quaternion, value) if misaligned else value
 
 
@@ -34,8 +40,14 @@ def projected_gravity(env: Any, *, misaligned: bool = True) -> torch.Tensor:
     """Return the delayed projected-gravity observation term."""
 
     sensor = _sensor_state(env)
-    index = max(0, len(sensor.projected_gravity_history) - 1 - sensor.imu_lag)
-    value = sensor.projected_gravity_history[index]
+    lag = sensor.imu_lag
+    if isinstance(lag, torch.Tensor) and lag.ndim > 0:
+        values = torch.stack(sensor.projected_gravity_history, dim=1)
+        indices = (values.shape[1] - 1 - lag).clamp_min(0)
+        value = values[torch.arange(env.num_envs, device=values.device), indices]
+    else:
+        index = max(0, len(sensor.projected_gravity_history) - 1 - int(lag))
+        value = sensor.projected_gravity_history[index]
     return _quat_apply(sensor.imu_quaternion, value) if misaligned else value
 
 
@@ -56,12 +68,30 @@ def joint_velocity(env: Any, *, delayed: bool = True) -> torch.Tensor:
     return sensor.previous_joint_velocity if delayed else env._encoder_velocity()
 
 
+def joint_position_rel_backlash(env: Any, *, biased: bool = True) -> torch.Tensor:
+    """Read the output-side encoder position for backlash entities.
+
+    The model bundle's actuator map already pairs each servo with its
+    passive backlash hinge.  Keeping this as a distinct term function mirrors
+    upstream task mutation and makes the semantic choice visible in a cloned
+    task configuration.
+    """
+
+    return joint_position(env, biased=biased)
+
+
+def joint_velocity_rel_backlash(env: Any, *, delayed: bool = True) -> torch.Tensor:
+    """Read the output-side encoder velocity for backlash entities."""
+
+    return joint_velocity(env, delayed=delayed)
+
+
 def base_lin_vel(env: Any) -> torch.Tensor:
     """Return privileged trunk linear velocity in the trunk frame."""
 
     if env.data is None:
         raise RuntimeError("Call reset() before reading observations")
-    return env.data.cvel[env.bundle.trunk_body_id, 3:6]
+    return env.data.cvel[..., env.bundle.root_body_id, 3:6]
 
 
 def last_action(env: Any) -> torch.Tensor:

@@ -123,6 +123,16 @@ class VideoWriter:
         )
         self._started_at = time.monotonic()
 
+    def __enter__(self) -> VideoWriter:
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        del exc_value, traceback
+        if exc_type is None:
+            self.close()
+        else:
+            self.abort()
+
     def write(self, frame: np.ndarray) -> None:
         """Write one contiguous uint8 ``(height, width, 3)`` frame."""
 

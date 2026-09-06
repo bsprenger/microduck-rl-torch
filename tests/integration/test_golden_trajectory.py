@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs.model import load_model_bundle
 from microduck_rl_torch.envs.observations import command_vector
 from microduck_rl_torch_verification.trajectory import (
     GoldenTrajectory,
@@ -16,7 +16,7 @@ from microduck_rl_torch_verification.trajectory import (
 def test_bam_torch_matches_native_golden_trajectory():
     fixture = Path(__file__).parents[1] / "fixtures/microduck_bam_golden.npz"
     expected = GoldenTrajectory.load(fixture)
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         dtype=torch.float64,
         fixed_iterations=True,
         solver_iterations=int(expected.metadata["solver_iterations"]),

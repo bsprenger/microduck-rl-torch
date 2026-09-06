@@ -66,6 +66,46 @@ reference and acceleration, but it is not a requirement for this project’s non
 - Keep the physics benchmark and the policy benchmark as separate measurements and artifacts so
   policy/device transfers cannot be mistaken for simulator throughput.
 
+## Coding and design preferences
+
+Prefer simple, direct, Pythonic solutions over elaborate frameworks. Optimize for clarity,
+composability, and low cognitive overhead rather than minimizing the number of lines users must
+write.
+
+Before introducing abstractions, inspect the existing code and look for a natural seam that can be
+extended directly. Reuse existing interfaces, data structures, and authoritative sources instead
+of creating parallel registries, catalogs, metadata models, factories, or configuration systems.
+
+Make important decisions explicit. Users should be able to see and control how components are
+constructed and connected. A small amount of explicit wiring is preferable to hidden behavior,
+magic defaults, implicit discovery, or a single “do everything” entry point.
+
+Keep responsibilities narrow and avoid coupling unrelated concerns. Components should expose
+useful primitives that callers can compose rather than assuming one prescribed workflow.
+
+Add validation where it protects a concrete invariant, especially at external or compatibility
+boundaries. Avoid speculative compatibility layers, generalized systems, or configuration
+machinery until real use cases require them.
+
+Prefer the smallest useful data model. Every field, abstraction, sidecar, and layer should have a
+clear purpose. Do not preserve or collect information merely because it might be useful later.
+
+Avoid premature generalization, but leave clean extension points when they arise naturally. Do not
+build the full future architecture to support hypothetical cases; implement the current need in a
+way that does not prevent later composition.
+
+Preserve existing public behavior and user changes unless a change is intentional and justified.
+Keep feature work narrowly scoped, and do not mix unrelated cleanup or architectural rewrites into
+the task.
+
+When reviewing designs, actively ask:
+
+- Can an existing object or function do this?
+- Can this be expressed with a direct function and a small record?
+- Is this abstraction removing real duplication or only organizing concepts?
+- Is hidden convenience worth the coupling it introduces?
+- What is the simplest design that remains composable and extensible?
+
 ## Common checks
 
 ```bash

@@ -122,9 +122,9 @@ def _run_local(
     if _device_type(device) == "cuda" and not torch.cuda.is_available():
         return _unsupported("microduck_rl_torch", device, "torch.cuda.is_available() is false")
 
-    from microduck_rl_torch.envs.model import load_microduck_model
+    from microduck_rl_torch.envs.model import load_model_bundle
 
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         device=device,
         dtype=torch.float32,
         fixed_iterations=True,

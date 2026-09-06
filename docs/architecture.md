@@ -28,8 +28,10 @@ TaskEnvCfg
 
 ManagerBasedTaskEnv
   ├── PhysicsBackend               model/data and low-level stepping
+  ├── SensorManager                named semantic sensors and histories
   ├── EnvironmentState              sensors, transition, manager/task data
-  ├── ActionManager                delay, scaling, actuator target
+  ├── TaskStateManager              persistent task components and reset hooks
+  ├── ActionManager                composed action terms and actuator targets
   ├── CommandManager               ordered command terms and resampling
   ├── ObservationManager           ordered actor/critic observation terms
   ├── RewardManager                independently evaluated weighted terms
@@ -45,28 +47,78 @@ about commands, observations, rewards, terminations, or task curricula.
 
 ## Lifecycle
 
-The current scalar environment executes this order:
+The environment supports one or many independent environment rows and executes
+the same order for both:
 
 ```text
 reset:
   seed RNG → restore model defaults → sample configured randomization
   → PhysicsBackend.reset → initialize state histories
-  → reset events → forward and refresh state baselines → observation
+  → SensorManager.reset → task-state/action/command manager reset
+  → reset events → forward and refresh all sensor/state baselines → observation
 
 step:
-  pre-physics events → action preparation → decimated physics
-  → sensor/contact/history update → post-physics events
+  task-state pre-physics → pre-physics events → action-term processing
+  → composed actuator target → decimated physics
+  → SensorManager update → task-state post-physics → post-physics events
   → reward → termination → curriculum → command update
-  → step events → interval events → actor observation
+  → step events → interval events → actor observation → automatic per-row reset
 
 `env.observations()` also computes every enabled configured group. The current
 velocity configuration exposes a 61D noisy actor group and a 64D privileged
 critic group; the policy-facing `env.observation()` default remains the actor
-group.
+group. With `num_envs > 1`, observations, commands, rewards, terminations,
+manager state, model randomization, and partial resets carry a leading
+environment dimension.
 ```
 
 The command used to calculate a transition's reward is therefore the command
 that produced that transition; command resampling happens afterward.
+
+## Rendering ownership and lifecycle
+
+Rendering is an optional environment capability, not a second simulation path.
+The environment exposes the small Gymnasium-shaped contract
+`render_mode=None | "rgb_array"`, `render()`, `close()`, and `metadata`. A
+`RenderConfig` in `TaskEnvCfg.viewer` selects the backend, output size, and
+camera. The renderer is created lazily on the first `render()` call and is
+released by `env.close()`.
+
+```python
+from microduck_rl_torch.envs import ManagerBasedTaskEnv
+from microduck_rl_torch.rendering import CameraConfig, RenderConfig
+
+env = ManagerBasedTaskEnv(
+    cfg,
+    render_mode="rgb_array",
+    render_config=RenderConfig(
+        backend="mujoco",
+        width=640,
+        height=480,
+        camera=CameraConfig(track_body="trunk_base"),
+    ),
+)
+try:
+    env.reset()
+    frame = env.render()  # uint8 array shaped (height, width, 3)
+finally:
+    env.close()
+```
+
+The native renderer mirrors the current Torch state into a scratch native
+`MjData`, runs `mj_forward`, and rasterizes the complete CAD model. The pure
+Torch renderer is available for named-camera ray rendering and shares the same
+environment contract, but it is intentionally narrower and does not replace
+the native renderer for high-fidelity rollout artifacts. Renderers never step
+physics, update observations, or own policy execution.
+
+`render_policy_rollout` is a thin policy-and-recording adapter around this
+contract. It captures post-step frames at an explicit `render_every` cadence,
+requires the requested output FPS to match simulated time, streams frames to
+ffmpeg, and closes the environment on success or failure. This keeps rendering
+semantics deterministic and prevents video timing or encoder lifetime from
+leaking into the task lifecycle. An interactive viewer can be added on the same
+environment API later without changing task or policy code.
 
 ## Composition and mutation
 
@@ -82,6 +134,30 @@ configured ordered terms and validates the resulting tensor shapes. A future
 task can therefore replace a velocity command with a phase or prop command,
 remove velocity rewards, and add new state under `EnvironmentState.task_data`
 without introducing another environment lifecycle or runtime class.
+
+Actions, sensors, and persistent task state use the same composition principle:
+
+- `ActionCfg` is an ordered mapping of `ActionTermCfg` objects. Each term owns
+  its action dimension, semantic entity, processing, clipping, and actuator
+  contribution. `ActionManager` concatenates policy slices and composes the
+  contributions into one backend target.
+- `SceneCfg.sensors` is an ordered named sensor contract. `SensorManager`
+  resolves MuJoCo sensor names and semantic body/site/joint/contact selectors
+  once at construction, then exposes values through `env.sensors[name]`.
+  Custom stateful readers use the same reset/update contract, which is the
+  extension point for backend-native raycast sensors.
+- `TaskEnvCfg.task_state` contains persistent task components. A
+  `TaskStateTermCfg` class is constructed once and receives explicit
+  `reset(env_ids)`, `pre_physics`, `post_physics`, and `step` callbacks from
+  `TaskStateManager`. Task phases and prop bookkeeping therefore do not leak
+  into `PhysicsBackend` or module globals.
+
+`SceneBuilder` now materializes a real composed MuJoCo wrapper when a task has
+multiple entities and no hand-written scene XML. It includes each entity's
+source XML, normalizes relative mesh roots, copies the world/terrain template,
+applies entity spawn transforms, and overlays entity keyframes into the
+compiled qpos vector. `EntityView` resolves per-entity bodies, geoms, sites,
+joints, actuators, and qpos/qvel addresses after compilation.
 
 The first task uses the exact upstream identifiers and factory names:
 
@@ -112,7 +188,7 @@ The structural correspondence is:
 | `ManagerBasedRlEnv` | `ManagerBasedTaskEnv` | Same role; direct lifecycle owner |
 | `ManagerBasedRlEnvCfg` | `TaskEnvCfg` | Same composition role; dataclass implementation |
 | `SceneCfg` / entities | `SceneCfg` / entities | Same task-owned model selection |
-| action/command/observation/reward/etc. managers | same manager names | Same manager graph and mutation concept |
+| action/command/observation/reward/etc. managers | same manager names | Same manager graph and mutation concept; action terms are now composed |
 | `tasks/*_env_cfg.py` factories | `tasks/*_env_cfg.py` factories | Same direct factory layout |
 | `tasks/mdp.py` terms | `tasks/mdp.py` plus focused Torch modules | Same term boundary and ordered composition |
 | registered task IDs | explicit task-name constants | Intentionally registration-free |
@@ -121,44 +197,45 @@ The structural correspondence is:
 The following differences remain deliberate or incomplete and should not be
 mistaken for upstream parity:
 
-1. The Torch backend currently supports one scalar environment. Upstream is
-   vectorized and manages per-environment buffers and partial resets.
-2. `TaskEnvCfg` uses lightweight dataclasses rather than mjlab's config and
+1. `TaskEnvCfg` uses lightweight dataclasses rather than mjlab's config and
    manager-term classes.
-3. Upstream's managers are built on richer mjlab runtime/config base classes;
+2. Upstream's managers are built on richer mjlab runtime/config base classes;
    Torch uses direct dataclasses and callbacks while preserving the same
    composition boundary and lifecycle phases.
-4. The velocity reward terms share a cached feature computation because their
+3. The velocity reward terms share a cached feature computation because their
    raw features overlap. They are still configured and weighted as independent
    manager terms; this is an implementation optimization, not a velocity-only
    reward-manager interface.
-5. Torch compiles one explicit MuJoCo scene XML selected by `SceneCfg`, whereas
-   upstream's scene/entity system can compose and replicate richer scene
-   layouts. The Torch model layer now resolves every configured entity into a
-   named `EntityView` (bodies, geoms, joints, and qpos/qvel addresses), so task
-   terms do not need robot-global indices. XML composition itself remains a
-   backend-specific boundary. Non-flat terrain is now a concrete scene
-   generator; the scalar backend materializes one bounded representative
-   obstacle, while upstream materializes a vectorized terrain grid.
-6. The Torch environment does not yet implement upstream's automatic
-   vectorized reset semantics or full Gym space contract.
-7. Reward scaling by control `dt` is an explicit `TaskEnvCfg` option and is
+4. Torch composes one compiled MuJoCo scene wrapper from the configured entity
+   XML sources, while upstream's scene importer composes and replicates richer
+   vectorized layouts. The Torch model layer resolves every configured entity
+   into a named `EntityView` (bodies, geoms, sites, joints, actuators, and
+   qpos/qvel addresses), and `SensorManager` uses those handles. Terrain
+   generators use a typed `TerrainOutput` boundary and can be applied to both
+   single- and multi-entity scenes. The current CPU Torch driver still uses an
+   explicitly selectable bounded collision approximation for authored
+   cylinder/ellipsoid/heightfield primitives; `collision_policy="error"`
+   rejects those scenes when exact native support is required.
+5. Reward scaling by control `dt` is an explicit `TaskEnvCfg` option and is
    disabled for the current golden-policy contract. Upstream tasks that need
    physical timestep scaling can enable it without changing manager code.
-8. The physics backend supports fixed or sampled actuator command lag and
+6. The physics backend supports fixed or sampled actuator command lag and
    output-side backlash feedback. The current golden configuration keeps
    actuator lag at zero because its tracked fixture was generated with zero
    lag; future upstream-style BAM task configs can set a `(3, 6)` lag range.
-9. The current repository implements the complete velocity task composition and
+7. The current repository implements the complete velocity task composition and
    the shared extension points, not placeholder bodies for every upstream task
    factory. Future task families still need their actual task terms, assets, and
-   task-specific state before they can be truthfully executable.
+   task-specific state before they can be truthfully executable. The built-in
+   velocity sensor histories and MicroDuck domain-randomization recipe are
+   opt-in task state (`metadata["velocity_state"]`); generic tasks do not inherit
+   those assumptions.
 
 These are the explicit remaining parity boundaries. None requires restoring a
 task runtime class; they belong in the environment, managers, task terms, or
-the backend state contract. In particular, adding the next scalar task variant
-does not wait on vectorization: it can reuse the lifecycle and add/mutate terms,
-provided its model assets and task-specific state terms are implemented.
+the backend state contract. Adding the next task variant can reuse the
+lifecycle and add/mutate terms, provided its model assets and task-specific
+state terms are implemented.
 
 ## Model variants
 

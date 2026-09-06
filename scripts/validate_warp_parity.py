@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -14,9 +15,13 @@ import numpy as np
 import torch
 
 from microduck_rl_torch.envs import ManagerBasedTaskEnv
-from microduck_rl_torch.envs.model import load_microduck_model
+from microduck_rl_torch.envs.model import load_model_bundle
 from microduck_rl_torch.envs.observations import command_vector
-from microduck_rl_torch.policies.huggingface import OnnxPolicy, fetch_policy
+from microduck_rl_torch.policies.huggingface import (
+    OnnxPolicy,
+    fetch_policy,
+    resolve_policy_filename,
+)
 from microduck_rl_torch.tasks import make_microduck_velocity_env_cfg
 from microduck_rl_torch_verification.warp_parity import (
     WarpParityTrace,
@@ -43,7 +48,7 @@ def _local_trace(
     # or self-collision-only, so the mesh-to-mesh contact kernel is not part of
     # this reference rollout and should not be initialized locally.
     task_cfg = make_microduck_velocity_env_cfg()
-    bundle = load_microduck_model(
+    bundle = load_model_bundle(
         entity_cfg=task_cfg.scene.entities["robot"],
         device=device,
         dtype=torch.float32,
@@ -174,9 +179,12 @@ def _run_upstream(
 
 
 def _policy_paths(policy_dir: Path, policy: str, download: bool) -> tuple[Path, Path]:
-    filename = policy if policy.endswith(".onnx") else f"{policy}.onnx"
-    policy_path = policy_dir / filename
     manifest_path = policy_dir / "manifest.json"
+    filename = policy if policy.endswith(".onnx") else f"{policy}.onnx"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text())
+        filename = resolve_policy_filename(manifest, policy)
+    policy_path = policy_dir / filename
     if download or not policy_path.is_file() or not manifest_path.is_file():
         artifact = fetch_policy(policy, output_dir=policy_dir)
         policy_path = artifact.policy_path
